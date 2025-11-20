@@ -13,7 +13,6 @@ export const WS_ENDPOINT = 'ws://127.0.0.1:10000'; // Bulletin node
 export const IPFS_API = 'http://127.0.0.1:5001';   // Local IPFS daemon
 export const HTTP_IPFS_API = 'http://127.0.0.1:8080';   // Local IPFS HTTP gateway
 const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB
-const MAX_CHUNKS = 2; // Max 2 MB to stored per block
 // -----------------
 
 function to_hex(input) {
@@ -57,14 +56,20 @@ export async function storeChunkedFile(api, pair, filePath, nonceMgr) {
 
   // ---- 2️⃣ Store chunks in Bulletin (expecting just one block) ----
   for (let i = 0; i < chunks.length; i++) {
-    if (i > 0 && i % MAX_CHUNKS == 0) {
-      await waitForNewBlock();
-    }
     const { cid, bytes } = chunks[i]
     console.log(`📤 Storing chunk #${i + 1} CID: ${cid}`)
-    const tx = api.tx.transactionStorage.store(bytes)
-    const result = await tx.signAndSend(pair, { nonce: nonceMgr.getAndIncrement() })
-    console.log(`✅ Stored chunk #${i + 1}, result:`, result.toHuman?.())
+    try {
+      const tx = api.tx.transactionStorage.store(bytes)
+      const result = await tx.signAndSend(pair, { nonce: nonceMgr.getAndIncrement() })
+      console.log(`✅ Stored chunk #${i + 1}, result:`, result.toHuman?.())
+    } catch(err) {
+      if (err.stack.includes("Immediately Dropped: The transaction couldn't enter the pool because of the limit")) {
+        await waitForNewBlock()
+        console.log("Retrying after waiting for new block")
+        --i
+        continue
+      }
+    }
   }
   return { chunks };
 }
