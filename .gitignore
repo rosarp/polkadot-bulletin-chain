@@ -13,6 +13,10 @@
 
 **/node_modules/
 **/kubo/
+package-lock.json
+
+# Polkadot API generated files
+.papi/
 
 # generated example files
 **/retrieved_picture.bin
