@@ -2,7 +2,8 @@ import { ApiPromise, WsProvider } from '@polkadot/api';
 import { Keyring } from '@polkadot/keyring';
 import { cryptoWaitReady } from '@polkadot/util-crypto';
 import { create } from 'ipfs-http-client';
-import { authorizeStorage, storeChunkedFile, storeMetadata, retrieveMetadata, retrieveFileForMetadata, buildUnixFSDag, waitForNewBlock, filesAreEqual, storeProof, reconstructDagFromProof, fileToDisk, NonceManager, WS_ENDPOINT, IPFS_API, HTTP_IPFS_API } from "./common";
+import { retrieveMetadata, retrieveFileForMetadata, buildUnixFSDag, waitForNewBlock, filesAreEqual, reconstructDagFromProof, fileToDisk, NonceManager, WS_ENDPOINT, IPFS_API, HTTP_IPFS_API } from "./common";
+import { storeChunkedFile, storeMetadata, storeProof, authorizeStorage } from './api';
 import fs from 'fs'
 import assert from "assert";
 
