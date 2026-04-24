@@ -32,13 +32,14 @@ zombienet-orchestrator = "0.3.13"
 subxt = { version = "0.43", default-features = false, features = ["jsonrpsee", "native"] }
 subxt-signer = { version = "0.43", features = ["sr25519"] }
 
-# For bitswap client
-litep2p = { version = "0.12", features = ["websocket"] }
+# For bitswap client (must match polkadot-sdk's pin)
+litep2p = { version = "0.13.3", features = ["websocket"] }
 futures = "0.3"
 async-trait = "0.1"
 bytes = "1"
 
 [features]
+auto-renew-tests = []
 zombie-sync-tests = []
 
 [build-dependencies]
