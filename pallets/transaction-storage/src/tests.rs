@@ -1390,7 +1390,6 @@ fn init_block(n: u64) {
 }
 
 type AutoRenewals = super::AutoRenewals<Test>;
-type PendingAutoRenewals = super::PendingAutoRenewals<Test>;
 
 #[test]
 fn enable_auto_renew_works() {
@@ -1560,28 +1559,17 @@ fn auto_renewal_lifecycle() {
 		// Verify data still exists before expiry
 		assert!(Transactions::get(1).is_some());
 
-		// Block 12: on_initialize takes Transactions(1) and populates PendingAutoRenewals.
-		// But run_to_block runs on_initialize + on_finalize. The on_finalize will panic
-		// because PendingAutoRenewals is not empty (no inherent ran).
-		// We need to manually advance and call process_auto_renewals.
-
-		// Advance block number to 12 manually
-		init_block(12);
-
-		// Verify PendingAutoRenewals was populated
-		let pending = PendingAutoRenewals::get();
-		assert_eq!(pending.len(), 1);
-		assert_eq!(pending[0].0, content_hash);
-
-		// Process auto-renewals (simulating the mandatory extrinsic)
-		// Refresh authorization before renewal (AuthorizationPeriod is 10 blocks,
-		// so auth granted at block 1 expired at block 11)
+		// At block 12, the original auth (granted at block 1 with period=10) has expired,
+		// so refresh _at_ block 12 before running on_initialize — that way the fresh
+		// auth's expiration is 12+10=22 (still valid when renewal runs).
+		System::set_block_number(12);
+		System::reset_events();
+		unhashed::put::<u32>(b":extrinsic_index", &0);
 		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 10, 100_000));
-
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
-
-		// Verify PendingAutoRenewals is now empty
-		assert!(PendingAutoRenewals::get().is_empty());
+		// Block 12 on_initialize takes Transactions(1) and performs the auto-renewal
+		// inline (merged from the former `process_auto_renewals` extrinsic into
+		// `on_initialize` — see the note there for why a separate inherent doesn't work).
+		<TransactionStorage as polkadot_sdk_frame::traits::Hooks<u64>>::on_initialize(12);
 
 		// Verify data was renewed into the current block
 		assert_eq!(TransactionByContentHash::get(content_hash), Some((12, 0)));
@@ -1610,7 +1598,7 @@ fn auto_renewal_consumes_authorization() {
 		let content_hash = blake2_256(&data);
 
 		// Authorize with exactly enough for 2 operations (store doesn't consume here,
-		// since it's unsigned, but renew does via process_auto_renewals)
+		// since it's unsigned, but auto-renewal consumes in `on_initialize`).
 		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 3, 6000));
 		assert_ok!(TransactionStorage::store(RuntimeOrigin::none(), data));
 		run_to_block(2, || None);
@@ -1621,10 +1609,13 @@ fn auto_renewal_consumes_authorization() {
 		let initial_extent = TransactionStorage::account_authorization_extent(who);
 		assert_eq!(initial_extent, AuthorizationExtent { transactions: 3, bytes: 6000 });
 
-		// Trigger expiry at block 12 — refresh auth first (AuthorizationPeriod = 10 blocks)
-		init_block(12);
+		// Refresh auth *at block 12* so its expiration (12+10=22) outlives the renewal,
+		// then trigger the in-on_initialize auto-renewal pass.
+		System::set_block_number(12);
+		System::reset_events();
+		unhashed::put::<u32>(b":extrinsic_index", &0);
 		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 3, 6000));
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
+		<TransactionStorage as polkadot_sdk_frame::traits::Hooks<u64>>::on_initialize(12);
 
 		// Authorization should have been consumed (3-1=2 transactions, 6000-2000=4000 bytes)
 		let after_extent = TransactionStorage::account_authorization_extent(who);
@@ -1648,10 +1639,13 @@ fn auto_renewal_fails_when_authorization_exhausted() {
 			TransactionStorage::enable_auto_renew(RuntimeOrigin::signed(who), content_hash,)
 		);
 
-		// First renewal at block 12 — refresh with exactly 1 operation worth of auth
-		init_block(12);
+		// First renewal at block 12 — refresh (at block 12 so expiration=22) with exactly
+		// 1 operation worth of auth, then run on_initialize to consume it.
+		System::set_block_number(12);
+		System::reset_events();
+		unhashed::put::<u32>(b":extrinsic_index", &0);
 		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 1, 2000));
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
+		<TransactionStorage as polkadot_sdk_frame::traits::Hooks<u64>>::on_initialize(12);
 
 		// Authorization is now fully consumed
 		let extent = TransactionStorage::account_authorization_extent(who);
@@ -1666,13 +1660,10 @@ fn auto_renewal_fails_when_authorization_exhausted() {
 			Transactions::insert(12u64, &block_txs);
 		}
 
-		// Second renewal at block 23 (12 + 10 + 1) — should fail
-		// We need block 23 because: obsolete = 23 - 10 - 1 = 12
+		// Second renewal attempt at block 23 (12 + 10 + 1) — should fail because auth
+		// is now zero. on_initialize(23) will emit AutoRenewalFailed and remove the
+		// AutoRenewals entry.
 		init_block(23);
-		let pending = PendingAutoRenewals::get();
-		assert_eq!(pending.len(), 1, "Should have pending renewal");
-
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
 
 		// Should have failed — event emitted and auto-renewal removed
 		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::AutoRenewalFailed {
@@ -1684,35 +1675,14 @@ fn auto_renewal_fails_when_authorization_exhausted() {
 }
 
 #[test]
-fn process_auto_renewals_rejects_signed_origin() {
-	new_test_ext().execute_with(|| {
-		run_to_block(1, || None);
-		assert_noop!(
-			TransactionStorage::process_auto_renewals(RuntimeOrigin::signed(1)),
-			DispatchError::BadOrigin,
-		);
-	});
-}
-
-#[test]
-fn process_auto_renewals_noop_when_empty() {
-	new_test_ext().execute_with(|| {
-		run_to_block(1, || None);
-		// Calling with no pending renewals should succeed (no-op)
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
-		assert!(PendingAutoRenewals::get().is_empty());
-	});
-}
-
-#[test]
-fn pending_auto_renewals_populated_only_for_registered_items() {
+fn auto_renewal_processes_only_registered_items() {
 	new_test_ext().execute_with(|| {
 		run_to_block(1, || None);
 		let who = 1;
 		let data1 = vec![0u8; 2000];
 		let data2 = vec![1u8; 2000];
 		let hash1 = blake2_256(&data1);
-		let _hash2 = blake2_256(&data2);
+		let hash2 = blake2_256(&data2);
 
 		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 10, 100_000));
 		assert_ok!(TransactionStorage::store(RuntimeOrigin::none(), data1));
@@ -1722,12 +1692,25 @@ fn pending_auto_renewals_populated_only_for_registered_items() {
 		// Only enable auto-renew for hash1, not hash2
 		assert_ok!(TransactionStorage::enable_auto_renew(RuntimeOrigin::signed(who), hash1,));
 
-		// Trigger expiry
-		init_block(12);
+		// Refresh auth *at block 12* (expiration=22) then trigger the
+		// in-on_initialize auto-renewal pass. It processes hash1 and simply drops the
+		// TransactionByContentHash mapping for hash2.
+		System::set_block_number(12);
+		System::reset_events();
+		unhashed::put::<u32>(b":extrinsic_index", &0);
+		assert_ok!(TransactionStorage::authorize_account(RuntimeOrigin::root(), who, 10, 100_000));
+		<TransactionStorage as polkadot_sdk_frame::traits::Hooks<u64>>::on_initialize(12);
 
-		let pending = PendingAutoRenewals::get();
-		assert_eq!(pending.len(), 1, "Only hash1 should be pending");
-		assert_eq!(pending[0].0, hash1);
+		// hash1 was renewed into block 12
+		assert_eq!(TransactionByContentHash::get(hash1), Some((12, 0)));
+		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::DataAutoRenewed {
+			index: 0,
+			content_hash: hash1,
+			account: who,
+		}));
+
+		// hash2 had no AutoRenewals registration → mapping dropped, no event
+		assert!(TransactionByContentHash::get(hash2).is_none());
 	});
 }
 
@@ -1784,7 +1767,7 @@ fn auto_renew_permissionless_transfer() {
 }
 
 #[test]
-fn process_auto_renewals_continues_on_per_item_failure() {
+fn auto_renewal_continues_on_per_item_failure() {
 	// Verify that if one renewal fails (e.g. block full), the remaining items are still processed.
 	new_test_ext().execute_with(|| {
 		run_to_block(1, || None);
@@ -1813,9 +1796,12 @@ fn process_auto_renewals_continues_on_per_item_failure() {
 			assert_ok!(TransactionStorage::enable_auto_renew(RuntimeOrigin::signed(who), *hash,));
 		}
 
-		// Fill up BlockTransactions so that renewals will hit TooManyTransactions.
-		// We do this by manually inserting items up to (max - 1), leaving room for only 1 renewal.
-		init_block(12);
+		// Set block 12 but don't run on_initialize yet — we need to refresh auth and
+		// pre-fill BlockTransactions before the renewal logic runs.
+		System::set_block_number(12);
+		System::reset_events();
+		unhashed::put::<u32>(b":extrinsic_index", &0);
+
 		assert_ok!(TransactionStorage::authorize_account(
 			RuntimeOrigin::root(),
 			who,
@@ -1823,11 +1809,7 @@ fn process_auto_renewals_continues_on_per_item_failure() {
 			100_000_000
 		));
 
-		// Verify PendingAutoRenewals was populated with 3 items
-		let pending = PendingAutoRenewals::get();
-		assert_eq!(pending.len(), 3);
-
-		// Fill block with (max - 1) dummy transactions so only 1 renewal fits
+		// Fill block with (max - 1) dummy transactions so only 1 renewal fits.
 		BlockTransactions::mutate(|txns| {
 			for _ in 0..(max_txns - 1) {
 				let _ = txns.try_push(TransactionInfo {
@@ -1841,11 +1823,8 @@ fn process_auto_renewals_continues_on_per_item_failure() {
 			}
 		});
 
-		// Process auto-renewals — should NOT return an error even though 2 of 3 fail
-		assert_ok!(TransactionStorage::process_auto_renewals(RuntimeOrigin::none()));
-
-		// PendingAutoRenewals should be fully consumed
-		assert!(PendingAutoRenewals::get().is_empty());
+		// Trigger the in-on_initialize auto-renewal pass.
+		<TransactionStorage as polkadot_sdk_frame::traits::Hooks<u64>>::on_initialize(12);
 
 		// First item should have succeeded (DataAutoRenewed event).
 		// Index is max_txns - 1 because the block already has max_txns - 1 items (0-indexed).

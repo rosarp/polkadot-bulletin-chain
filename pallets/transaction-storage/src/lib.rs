@@ -365,9 +365,13 @@ pub mod pallet {
 			if obsolete > Zero::zero() {
 				weight.saturating_accrue(db_weight.writes(1));
 				if let Some(transactions) = <Transactions<T>>::take(obsolete) {
-					// Before removing, collect any transactions that are registered for
-					// auto-renewal and schedule them for processing this block.
-					let mut pending = PendingAutoRenewals::<T>::get();
+					// Process each expiring transaction: drop its content-hash mapping if
+					// still current, and — if auto-renewal is registered — attempt the
+					// renewal inline. Inlining here avoids needing a separate mandatory
+					// inherent (a pallet can only contribute one inherent per block via
+					// `ProvideInherent::create_inherent`, and that slot is taken by
+					// `check_proof`).
+					let mut renewed_count: u32 = 0;
 					for tx_info in transactions.iter() {
 						let hash: ContentHash = tx_info.content_hash;
 						// Only remove TransactionByContentHash if this entry still points to the
@@ -382,20 +386,19 @@ pub mod pallet {
 						} else {
 							weight.saturating_accrue(db_weight.reads(1));
 						}
-						// Check if auto-renewal is registered for this content hash.
+						// Check if auto-renewal is registered for this content hash and
+						// attempt it directly if so.
+						weight.saturating_accrue(db_weight.reads(1));
 						if let Some(renewal_data) = AutoRenewals::<T>::get(hash) {
-							weight.saturating_accrue(db_weight.reads(1));
-							// try_push silently drops items beyond MaxBlockTransactions —
-							// auto-renewal is best-effort; excess items simply won't be
-							// renewed this block.
-							let _ = pending.try_push((hash, tx_info.clone(), renewal_data));
-						} else {
-							weight.saturating_accrue(db_weight.reads(1));
+							Self::process_auto_renewal(hash, tx_info.clone(), renewal_data);
+							renewed_count = renewed_count.saturating_add(1);
 						}
 					}
-					if !pending.is_empty() {
-						PendingAutoRenewals::<T>::put(&pending);
-						weight.saturating_accrue(db_weight.writes(1));
+					// Charge benchmarked weight for the actual renewals performed.
+					if renewed_count > 0 {
+						weight.saturating_accrue(T::WeightInfo::process_auto_renewals(
+							renewed_count,
+						));
 					}
 				}
 			}
@@ -430,23 +433,6 @@ pub mod pallet {
 			}
 			#[cfg(not(feature = "try-runtime"))]
 			assert!(proof_ok, "Storage proof must be checked once in the block");
-
-			// All pending auto-renewals must have been processed by `process_auto_renewals`.
-			#[cfg(feature = "try-runtime")]
-			if !PendingAutoRenewals::<T>::get().is_empty() {
-				tracing::warn!(
-					target: LOG_TARGET,
-					"Pending auto-renewals were not processed (expected during try-runtime)"
-				);
-				// Clear pending renewals so try-runtime doesn't leave stale state.
-				PendingAutoRenewals::<T>::kill();
-			}
-
-			#[cfg(not(feature = "try-runtime"))]
-			assert!(
-				PendingAutoRenewals::<T>::get().is_empty(),
-				"All pending auto-renewals must be processed by process_auto_renewals"
-			);
 
 			// Insert new transactions, iff they have chunks.
 			let transactions = <BlockTransactions<T>>::take();
@@ -760,61 +746,6 @@ pub mod pallet {
 			Ok(().into())
 		}
 
-		/// Process all pending auto-renewals for this block.
-		///
-		/// This is a **mandatory** extrinsic: block authors must include it whenever
-		/// `on_initialize` populated [`PendingAutoRenewals`]. Failure to include it will
-		/// cause `on_finalize` to panic and the block to be rejected.
-		///
-		/// For each pending item the associated account's authorization is consumed. If the
-		/// account no longer has sufficient authorization the renewal is skipped (not panicked)
-		/// and an [`AutoRenewalFailed`](Event::AutoRenewalFailed) event is emitted. Auto-renewal
-		/// registration is automatically removed for failed items.
-		#[pallet::call_index(11)]
-		#[pallet::weight((T::WeightInfo::process_auto_renewals(T::MaxBlockTransactions::get()), DispatchClass::Mandatory))]
-		pub fn process_auto_renewals(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
-			ensure_none(origin)?;
-			let pending = PendingAutoRenewals::<T>::take();
-
-			for (content_hash, tx_info, renewal_data) in pending.into_iter() {
-				let scope = AuthorizationScope::Account(renewal_data.account.clone());
-				// check_authorization with consume=true atomically validates and debits the
-				// authorization in storage.
-				let can_renew = Self::check_authorization(&scope, tx_info.size, true).is_ok();
-
-				if can_renew {
-					match Self::do_renew(tx_info) {
-						Ok(new_index) => {
-							Self::deposit_event(Event::DataAutoRenewed {
-								index: new_index,
-								content_hash,
-								account: renewal_data.account,
-							});
-						},
-						Err(_) => {
-							// Block is full — remove the auto-renewal registration.
-							// The data will expire; the user can re-register if desired.
-							AutoRenewals::<T>::remove(content_hash);
-							Self::deposit_event(Event::AutoRenewalFailed {
-								content_hash,
-								account: renewal_data.account,
-							});
-						},
-					}
-				} else {
-					// Insufficient authorization — remove the auto-renewal registration so the
-					// chain doesn't try (and fail) to renew it again next cycle.
-					AutoRenewals::<T>::remove(content_hash);
-					Self::deposit_event(Event::AutoRenewalFailed {
-						content_hash,
-						account: renewal_data.account,
-					});
-				}
-			}
-
-			Ok(().into())
-		}
-
 		/// Enable automatic renewal for a previously stored piece of data.
 		///
 		/// `who` must have sufficient account authorization (transactions > 0 and bytes >=
@@ -954,20 +885,6 @@ pub mod pallet {
 	pub type AutoRenewals<T: Config> =
 		StorageMap<_, Blake2_128Concat, ContentHash, AutoRenewalData<T::AccountId>, OptionQuery>;
 
-	/// Transactions that must be auto-renewed in the current block.
-	///
-	/// Populated by `on_initialize` when a block's data is about to expire.
-	/// Cleared by the `process_auto_renewals` mandatory extrinsic executed in the same block.
-	#[pallet::storage]
-	pub(super) type PendingAutoRenewals<T: Config> = StorageValue<
-		_,
-		BoundedVec<
-			(ContentHash, TransactionInfo, AutoRenewalData<T::AccountId>),
-			T::MaxBlockTransactions,
-		>,
-		ValueQuery,
-	>;
-
 	/// Was the proof checked in this block?
 	#[pallet::storage]
 	pub(super) type ProofChecked<T: Config> = StorageValue<_, bool, ValueQuery>;
@@ -1044,7 +961,7 @@ pub mod pallet {
 		}
 
 		fn is_inherent(call: &Self::Call) -> bool {
-			matches!(call, Call::check_proof { .. } | Call::process_auto_renewals { .. })
+			matches!(call, Call::check_proof { .. })
 		}
 	}
 
@@ -1053,9 +970,9 @@ pub mod pallet {
 		type Call = Call<T>;
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
-			// Inherent-style calls (check_proof, process_auto_renewals) are injected by
-			// the block author, not the transaction pool. Return a valid but empty
-			// transaction if one arrives here.
+			// Inherent-style calls (check_proof) are injected by the block author, not
+			// the transaction pool. Return a valid but empty transaction if one arrives
+			// here.
 			if Self::is_inherent(call) {
 				return Ok(ValidTransaction::default());
 			}
@@ -1168,8 +1085,8 @@ pub mod pallet {
 		}
 
 		/// Common implementation for [`renew`](Self::renew),
-		/// [`renew_content_hash`](Self::renew_content_hash), and
-		/// [`process_auto_renewals`](Self::process_auto_renewals).
+		/// [`renew_content_hash`](Self::renew_content_hash), and the auto-renewal
+		/// processing done in `on_initialize`.
 		///
 		/// Indexes the renewal via `sp_io::transaction_index::renew`, pushes a new
 		/// `TransactionInfo` into [`BlockTransactions`], and updates
@@ -1203,6 +1120,45 @@ pub mod pallet {
 			);
 
 			Ok(new_index)
+		}
+
+		/// Attempt to auto-renew a single expiring transaction.
+		///
+		/// Called from `on_initialize` for each expiring transaction that has an
+		/// [`AutoRenewals`] entry. On success, emits
+		/// [`DataAutoRenewed`](Event::DataAutoRenewed). On failure (insufficient
+		/// authorization or block-full) removes the [`AutoRenewals`] registration and
+		/// emits [`AutoRenewalFailed`](Event::AutoRenewalFailed) — the data will
+		/// expire and the user can re-register if desired.
+		///
+		/// `pub(crate)` so the benchmark can exercise the per-item cost directly.
+		pub(crate) fn process_auto_renewal(
+			content_hash: ContentHash,
+			tx_info: TransactionInfo,
+			renewal_data: AutoRenewalData<T::AccountId>,
+		) {
+			let scope = AuthorizationScope::Account(renewal_data.account.clone());
+			// check_authorization with consume=true atomically validates and debits the
+			// authorization in storage.
+			let can_renew = Self::check_authorization(&scope, tx_info.size, true).is_ok();
+
+			if can_renew {
+				if let Ok(new_index) = Self::do_renew(tx_info) {
+					Self::deposit_event(Event::DataAutoRenewed {
+						index: new_index,
+						content_hash,
+						account: renewal_data.account,
+					});
+					return;
+				}
+				// do_renew failed (block is full) — fall through to failure path.
+			}
+
+			AutoRenewals::<T>::remove(content_hash);
+			Self::deposit_event(Event::AutoRenewalFailed {
+				content_hash,
+				account: renewal_data.account,
+			});
 		}
 
 		/// Returns `true` if the system is beyond the given expiration point.
@@ -1558,8 +1514,6 @@ pub mod pallet {
 						.into()
 					}))
 				},
-				// Mandatory inherent-style call — always allowed, no pool validation needed.
-				Call::<T>::process_auto_renewals { .. } => Ok(None),
 				_ => Err(InvalidTransaction::Call.into()),
 			}
 		}
@@ -1607,6 +1561,16 @@ pub mod pallet {
 						.ok_or(RENEWED_NOT_FOUND)?;
 					let info = Self::transaction_info(block, index).ok_or(RENEWED_NOT_FOUND)?;
 					(info.size as usize, info.content_hash)
+				},
+				Call::<T>::enable_auto_renew { .. } | Call::<T>::disable_auto_renew { .. } => {
+					// Authorization is consumed only at renewal time (in `on_initialize`),
+					// not at registration. The dispatch body does the actual ownership/
+					// existence/authorization checks, so no pool-time check is needed
+					// here — just accept the signed call.
+					return Ok((
+						context.want_valid_transaction().then(ValidTransaction::default),
+						None,
+					));
 				},
 				_ => return Err(InvalidTransaction::Call.into()),
 			};

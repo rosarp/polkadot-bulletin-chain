@@ -452,6 +452,9 @@ mod benchmarks {
 		Ok(())
 	}
 
+	/// Measures the cost of performing `n` per-item auto-renewals. The result weight
+	/// is what `on_initialize` charges when it processes `n` expiring items with
+	/// registered auto-renewal.
 	#[benchmark]
 	fn process_auto_renewals(
 		n: Linear<1, { T::MaxBlockTransactions::get() }>,
@@ -469,8 +472,10 @@ mod benchmarks {
 		)
 		.map_err(|_| BenchmarkError::Stop("unable to authorize account"))?;
 
-		// Store n distinct transactions so we have n TransactionInfo entries
-		let mut pending = PendingAutoRenewals::<T>::get();
+		// Store n distinct transactions, each at its own block, so we end up with n
+		// `TransactionInfo` entries and n corresponding `AutoRenewals` registrations.
+		let mut items: Vec<(ContentHash, TransactionInfo, AutoRenewalData<T::AccountId>)> =
+			Vec::with_capacity(n as usize);
 		for i in 0..n {
 			let data = vec![i as u8; T::MaxTransactionSize::get() as usize];
 			let content_hash = sp_io::hashing::blake2_256(&data);
@@ -484,18 +489,17 @@ mod benchmarks {
 				.ok_or(BenchmarkError::Stop("no transactions at expected block"))?;
 
 			let renewal_data = AutoRenewalData { account: caller.clone() };
-			pending
-				.try_push((content_hash, tx_info, renewal_data))
-				.map_err(|_| BenchmarkError::Stop("unable to push pending renewal"))?;
+			AutoRenewals::<T>::insert(content_hash, renewal_data.clone());
+			items.push((content_hash, tx_info, renewal_data));
 		}
 
-		// Directly populate PendingAutoRenewals (simulating what on_initialize does)
-		PendingAutoRenewals::<T>::put(&pending);
+		#[block]
+		{
+			for (hash, tx_info, renewal_data) in items {
+				TransactionStorage::<T>::process_auto_renewal(hash, tx_info, renewal_data);
+			}
+		}
 
-		#[extrinsic_call]
-		_(RawOrigin::None);
-
-		assert!(PendingAutoRenewals::<T>::get().is_empty());
 		Ok(())
 	}
 
