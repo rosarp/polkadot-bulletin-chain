@@ -121,4 +121,12 @@ impl pallet_transaction_storage::Config for Runtime {
 	type RemoveExpiredAuthorizationLongevity = RemoveExpiredAuthorizationLongevity;
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = pallet_transaction_storage::benchmarking::DefaultCheckProofHelper;
+	type OnTransactionExpiring = crate::StorageAutoRenewal;
+}
+
+impl pallet_storage_auto_renewal::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = crate::weights::pallet_storage_auto_renewal::WeightInfo<Runtime>;
+	type MaxBlockTransactions = crate::ConstU32<512>;
+	type StorageRenewer = crate::TransactionStorage;
 }

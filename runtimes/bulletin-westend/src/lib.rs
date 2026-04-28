@@ -522,6 +522,7 @@ construct_runtime!(
 
 		// Storage
 		TransactionStorage: pallet_transaction_storage = 40,
+		StorageAutoRenewal: pallet_storage_auto_renewal = 41,
 
 		// Collator support. The order of these 5 are important and shall not change.
 		Authorship: pallet_authorship = 20,

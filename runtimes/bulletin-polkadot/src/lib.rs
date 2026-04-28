@@ -420,6 +420,14 @@ impl pallet_transaction_storage::Config for Runtime {
 	type RemoveExpiredAuthorizationLongevity = RemoveExpiredAuthorizationLongevity;
 	#[cfg(feature = "runtime-benchmarks")]
 	type BenchmarkHelper = CheckProofHelper;
+	type OnTransactionExpiring = StorageAutoRenewal;
+}
+
+impl pallet_storage_auto_renewal::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = weights::pallet_storage_auto_renewal::WeightInfo<Runtime>;
+	type MaxBlockTransactions = ConstU32<512>;
+	type StorageRenewer = TransactionStorage;
 }
 
 /// Pre-computed storage proof for benchmarking `check_proof`.
@@ -496,17 +504,14 @@ impl pallet_sudo::Config for Runtime {
 	codec::Decode,
 	codec::DecodeWithMemTracking,
 	Debug,
+	Default,
 	codec::MaxEncodedLen,
 	scale_info::TypeInfo,
 )]
 pub enum ProxyType {
 	/// Fully permissioned proxy. Can execute any call on behalf of _proxied_.
+	#[default]
 	Any,
-}
-impl Default for ProxyType {
-	fn default() -> Self {
-		Self::Any
-	}
 }
 impl InstanceFilter<RuntimeCall> for ProxyType {
 	fn filter(&self, _c: &RuntimeCall) -> bool {
@@ -575,6 +580,7 @@ construct_runtime!(
 
 		// Storage
 		TransactionStorage: pallet_transaction_storage = 40,
+		StorageAutoRenewal: pallet_storage_auto_renewal = 41,
 
 		// Bridge
 		RelayerSet: pallet_relayer_set = 50,

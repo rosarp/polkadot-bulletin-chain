@@ -14,6 +14,7 @@ pub mod pallet_bridge_messages;
 pub mod pallet_bridge_parachains;
 pub mod pallet_proxy;
 pub mod pallet_relayer_set;
+pub mod pallet_storage_auto_renewal;
 pub mod pallet_sudo;
 pub mod pallet_timestamp;
 pub mod pallet_transaction_storage;

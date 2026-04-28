@@ -29,6 +29,7 @@ extern crate alloc;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
+pub mod traits;
 pub mod weights;
 
 pub mod migrations;
@@ -64,6 +65,7 @@ pub type CreditOf<T> = Credit<<T as frame_system::Config>::AccountId, <T as Conf
 
 // Re-export pallet items so that they can be accessed from the crate namespace.
 pub use pallet::*;
+pub use traits::{OnTransactionExpiring, StorageRenewer};
 pub use weights::WeightInfo;
 
 const LOG_TARGET: &str = "runtime::transaction-storage";
@@ -159,7 +161,7 @@ type AuthorizationFor<T> = Authorization<BlockNumberFor<T>>;
 #[derive(Encode, Decode, Clone, Debug, PartialEq, Eq, scale_info::TypeInfo, MaxEncodedLen)]
 pub struct TransactionInfo {
 	/// Chunk trie root.
-	chunk_root: <BlakeTwo256 as Hash>::Output,
+	pub chunk_root: <BlakeTwo256 as Hash>::Output,
 
 	/// Plain hash of indexed data.
 	pub content_hash: ContentHash,
@@ -169,13 +171,13 @@ pub struct TransactionInfo {
 	pub cid_codec: CidCodec,
 
 	/// Size of indexed data in bytes.
-	size: u32,
+	pub size: u32,
 	/// Total number of chunks added in the block with this transaction. This
 	/// is used to find transaction info by block chunk index using binary search.
 	///
 	/// Cumulative value of all previous transactions in the block; the last transaction holds the
 	/// total chunks.
-	block_chunks: ChunkIndex,
+	pub block_chunks: ChunkIndex,
 }
 
 impl TransactionInfo {
@@ -272,6 +274,11 @@ pub mod pallet {
 		/// [`DEFAULT_MAX_TRANSACTION_SIZE`] / [`DEFAULT_MAX_BLOCK_TRANSACTIONS`].
 		#[cfg(feature = "runtime-benchmarks")]
 		type BenchmarkHelper: crate::benchmarking::BenchmarkHelper<Self>;
+		/// Hook invoked once per transaction whose retention period has elapsed and
+		/// is about to be dropped. Defaults to `()` (no-op); wire to
+		/// `pallet-storage-auto-renewal` to enable automatic renewal of registered
+		/// content hashes.
+		type OnTransactionExpiring: traits::OnTransactionExpiring;
 	}
 
 	#[pallet::error]
@@ -359,7 +366,32 @@ pub mod pallet {
 			let obsolete = n.saturating_sub(period.saturating_add(One::one()));
 			if obsolete > Zero::zero() {
 				weight.saturating_accrue(db_weight.writes(1));
-				<Transactions<T>>::remove(obsolete);
+				if let Some(transactions) = <Transactions<T>>::take(obsolete) {
+					let num_expiring = transactions.len() as u32;
+					for tx_info in transactions.iter() {
+						let hash: ContentHash = tx_info.content_hash;
+						// Only remove TransactionByContentHash if this entry still points to the
+						// obsolete block
+						if let Some((block, _)) = TransactionByContentHash::<T>::get(hash) {
+							if block == obsolete {
+								TransactionByContentHash::<T>::remove(hash);
+								weight.saturating_accrue(db_weight.reads_writes(1, 1));
+							} else {
+								weight.saturating_accrue(db_weight.reads(1));
+							}
+						} else {
+							weight.saturating_accrue(db_weight.reads(1));
+						}
+						// Notify the configured consumer (e.g. `pallet-storage-auto-renewal`)
+						// that this transaction is being dropped. Default `()` impl is a no-op.
+						T::OnTransactionExpiring::on_expiring(hash, tx_info);
+					}
+					weight.saturating_accrue(
+						<T::OnTransactionExpiring as traits::OnTransactionExpiring>::on_expiring_weight(
+							num_expiring,
+						),
+					);
+				}
 			}
 
 			// For `on_finalize`
@@ -483,7 +515,7 @@ pub mod pallet {
 		///
 		/// O(1).
 		#[pallet::call_index(1)]
-		#[pallet::weight(T::WeightInfo::renew())]
+		#[pallet::weight((T::WeightInfo::renew(), DispatchClass::Operational))]
 		pub fn renew(
 			origin: OriginFor<T>,
 			block: BlockNumberFor<T>,
@@ -497,31 +529,9 @@ pub mod pallet {
 			// checked by pre_dispatch_signed.
 			Self::ensure_data_size_ok(info.size as usize)?;
 
-			let extrinsic_index =
-				<frame_system::Pallet<T>>::extrinsic_index().ok_or(Error::<T>::BadContext)?;
 			let content_hash = info.content_hash;
-			sp_io::transaction_index::renew(extrinsic_index, content_hash);
-
-			let mut index = 0;
-			<BlockTransactions<T>>::mutate(|transactions| {
-				if transactions.len() + 1 > T::MaxBlockTransactions::get() as usize {
-					return Err(Error::<T>::TooManyTransactions);
-				}
-				let chunks = num_chunks(info.size);
-				let total_chunks = TransactionInfo::total_chunks(transactions) + chunks;
-				index = transactions.len() as u32;
-				transactions
-					.try_push(TransactionInfo {
-						chunk_root: info.chunk_root,
-						size: info.size,
-						content_hash: info.content_hash,
-						hashing: info.hashing,
-						cid_codec: info.cid_codec,
-						block_chunks: total_chunks,
-					})
-					.map_err(|_| Error::<T>::TooManyTransactions)
-			})?;
-			Self::deposit_event(Event::Renewed { index, content_hash });
+			let new_index = Self::do_renew(info)?;
+			Self::deposit_event(Event::Renewed { index: new_index, content_hash });
 			Ok(().into())
 		}
 
@@ -706,6 +716,32 @@ pub mod pallet {
 			Self::deposit_event(Event::PreimageAuthorizationRefreshed { content_hash });
 			Ok(())
 		}
+
+		/// Renew previously stored data by content hash. The content hash is the BLAKE2b hash
+		/// of the original data, as emitted in the [`Stored`](Event::Stored) or
+		/// [`Renewed`](Event::Renewed) event.
+		///
+		/// This is a convenience alternative to [`renew`](Self::renew) that does not require
+		/// knowing the exact `(block_number, tx_index)` pair.
+		///
+		/// Emits [`Renewed`](Event::Renewed) when successful.
+		#[pallet::call_index(10)]
+		#[pallet::weight((T::WeightInfo::renew_content_hash(), DispatchClass::Operational))]
+		pub fn renew_content_hash(
+			_origin: OriginFor<T>,
+			content_hash: ContentHash,
+		) -> DispatchResultWithPostInfo {
+			let (block, index) = TransactionByContentHash::<T>::get(content_hash)
+				.ok_or(Error::<T>::RenewedNotFound)?;
+
+			let info = Self::transaction_info(block, index).ok_or(Error::<T>::RenewedNotFound)?;
+
+			ensure!(Self::data_size_ok(info.size as usize), Error::<T>::BadDataSize);
+
+			let new_index = Self::do_renew(info)?;
+			Self::deposit_event(Event::Renewed { index: new_index, content_hash });
+			Ok(().into())
+		}
 	}
 
 	#[pallet::event]
@@ -740,7 +776,7 @@ pub mod pallet {
 	/// Collection of transaction metadata by block number.
 	#[pallet::storage]
 	#[pallet::getter(fn transaction_roots)]
-	pub(super) type Transactions<T: Config> = StorageMap<
+	pub type Transactions<T: Config> = StorageMap<
 		_,
 		Blake2_128Concat,
 		BlockNumberFor<T>,
@@ -766,8 +802,13 @@ pub mod pallet {
 
 	// Intermediates
 	#[pallet::storage]
-	pub(super) type BlockTransactions<T: Config> =
+	pub type BlockTransactions<T: Config> =
 		StorageValue<_, BoundedVec<TransactionInfo, T::MaxBlockTransactions>, ValueQuery>;
+
+	/// Maps content hash to its most recent (block_number, tx_index) location.
+	#[pallet::storage]
+	pub type TransactionByContentHash<T: Config> =
+		StorageMap<_, Blake2_128Concat, ContentHash, (BlockNumberFor<T>, u32), OptionQuery>;
 
 	/// Was the proof checked in this block?
 	#[pallet::storage]
@@ -854,6 +895,11 @@ pub mod pallet {
 		type Call = Call<T>;
 
 		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
+			// `check_proof` is injected by the block author as an inherent, not by the
+			// transaction pool. Return a valid but empty transaction if one arrives here.
+			if Self::is_inherent(call) {
+				return Ok(ValidTransaction::default());
+			}
 			Self::check_unsigned(call, CheckContext::Validate)?.ok_or(IMPOSSIBLE.into())
 		}
 
@@ -948,6 +994,10 @@ pub mod pallet {
 					})
 					.map_err(|_| Error::<T>::TooManyTransactions)
 			})?;
+			TransactionByContentHash::<T>::insert(
+				cid.content_hash,
+				(frame_system::Pallet::<T>::block_number(), index),
+			);
 
 			Self::deposit_event(Event::Stored {
 				index,
@@ -956,6 +1006,45 @@ pub mod pallet {
 			});
 
 			Ok(())
+		}
+
+		/// Common implementation for [`renew`](Self::renew) and
+		/// [`renew_content_hash`](Self::renew_content_hash). Also exposed externally via
+		/// the [`StorageRenewer`](traits::StorageRenewer) trait for sibling pallets such
+		/// as `pallet-storage-auto-renewal`.
+		///
+		/// Indexes the renewal via `sp_io::transaction_index::renew`, pushes a new
+		/// `TransactionInfo` into [`BlockTransactions`], and updates
+		/// [`TransactionByContentHash`]. Returns the new transaction index on success.
+		pub(crate) fn do_renew(info: TransactionInfo) -> Result<u32, Error<T>> {
+			let extrinsic_index =
+				<frame_system::Pallet<T>>::extrinsic_index().ok_or(Error::<T>::BadContext)?;
+			let content_hash = info.content_hash;
+			sp_io::transaction_index::renew(extrinsic_index, content_hash);
+
+			let mut new_index = 0u32;
+			<BlockTransactions<T>>::mutate(|transactions| {
+				let chunks = num_chunks(info.size);
+				let total_chunks = TransactionInfo::total_chunks(transactions) + chunks;
+				new_index = transactions.len() as u32;
+				transactions
+					.try_push(TransactionInfo {
+						chunk_root: info.chunk_root,
+						size: info.size,
+						content_hash: info.content_hash,
+						hashing: info.hashing,
+						cid_codec: info.cid_codec,
+						block_chunks: total_chunks,
+					})
+					.map_err(|_| Error::<T>::TooManyTransactions)
+			})?;
+
+			TransactionByContentHash::<T>::insert(
+				content_hash,
+				(frame_system::Pallet::<T>::block_number(), new_index),
+			);
+
+			Ok(new_index)
 		}
 
 		/// Returns `true` if the system is beyond the given expiration point.
@@ -1061,7 +1150,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		fn authorization_extent(scope: AuthorizationScopeFor<T>) -> AuthorizationExtent {
+		pub(crate) fn authorization_extent(scope: AuthorizationScopeFor<T>) -> AuthorizationExtent {
 			let Some(authorization) = Authorizations::<T>::get(&scope) else {
 				return AuthorizationExtent { transactions: 0, bytes: 0 };
 			};
@@ -1139,7 +1228,7 @@ pub mod pallet {
 		}
 
 		/// Returns the [`TransactionInfo`] for the specified store/renew transaction.
-		fn transaction_info(
+		pub(crate) fn transaction_info(
 			block_number: BlockNumberFor<T>,
 			index: u32,
 		) -> Option<TransactionInfo> {
@@ -1156,7 +1245,7 @@ pub mod pallet {
 
 		/// Check that authorization exists for data of the given size to be stored in a single
 		/// transaction. If `consume` is `true`, the authorization is consumed.
-		fn check_authorization(
+		pub(crate) fn check_authorization(
 			scope: &AuthorizationScopeFor<T>,
 			size: u32,
 			consume: bool,
@@ -1275,6 +1364,16 @@ pub mod pallet {
 						context,
 					)
 				},
+				Call::<T>::renew_content_hash { content_hash } => {
+					let (block, index) = TransactionByContentHash::<T>::get(*content_hash)
+						.ok_or(RENEWED_NOT_FOUND)?;
+					let info = Self::transaction_info(block, index).ok_or(RENEWED_NOT_FOUND)?;
+					Self::check_store_renew_unsigned(
+						info.size as usize,
+						|| info.content_hash,
+						context,
+					)
+				},
 				Call::<T>::remove_expired_account_authorization { who } => {
 					Self::check_authorization_expired(&AuthorizationScope::Account(who.clone()))?;
 					Ok(context.want_valid_transaction().then(|| {
@@ -1342,6 +1441,12 @@ pub mod pallet {
 						}),
 						None,
 					));
+				},
+				Call::<T>::renew_content_hash { content_hash } => {
+					let (block, index) = TransactionByContentHash::<T>::get(*content_hash)
+						.ok_or(RENEWED_NOT_FOUND)?;
+					let info = Self::transaction_info(block, index).ok_or(RENEWED_NOT_FOUND)?;
+					(info.size as usize, info.content_hash)
 				},
 				_ => return Err(InvalidTransaction::Call.into()),
 			};
@@ -1459,6 +1564,26 @@ pub mod pallet {
 }
 
 pub mod extension;
+
+impl<T: Config> traits::StorageRenewer<T::AccountId> for Pallet<T> {
+	fn transaction_info_for_content_hash(content_hash: ContentHash) -> Option<TransactionInfo> {
+		let (block, index) = TransactionByContentHash::<T>::get(content_hash)?;
+		Self::transaction_info(block, index)
+	}
+
+	fn account_authorization_extent(who: &T::AccountId) -> AuthorizationExtent {
+		Self::authorization_extent(AuthorizationScope::Account(who.clone()))
+	}
+
+	fn try_consume_account_authorization(who: &T::AccountId, size: u32) -> bool {
+		let scope = AuthorizationScope::Account(who.clone());
+		Self::check_authorization(&scope, size, true).is_ok()
+	}
+
+	fn do_renew(info: TransactionInfo) -> Result<u32, DispatchError> {
+		Self::do_renew(info).map_err(Into::into)
+	}
+}
 
 #[cfg(any(test, feature = "try-runtime"))]
 impl<T: Config> Pallet<T> {
