@@ -37,6 +37,7 @@ westend-runtime-constants = { git = "https://github.com/paritytech/polkadot-sdk.
 bulletin-polkadot-runtime = { path = "runtimes/bulletin-polkadot" }
 bulletin-westend-runtime = { path = "runtimes/bulletin-westend" }
 pallet-relayer-set = { path = "pallets/relayer-set", default-features = false }
+pallet-storage-auto-renewal = { path = "pallets/storage-auto-renewal", default-features = false }
 pallet-transaction-storage = { path = "pallets/transaction-storage", default-features = false }
 pallet-validator-set = { path = "pallets/validator-set", default-features = false }
 pallets-common = { path = "pallets/common", default-features = false }
@@ -174,6 +175,7 @@ members = [
 	"node",
 	"pallets/common",
 	"pallets/relayer-set",
+	"pallets/storage-auto-renewal",
 	"pallets/transaction-storage",
 	"pallets/transaction-storage/primitives",
 	"pallets/validator-set",

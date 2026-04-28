@@ -2090,6 +2090,7 @@ dependencies = [
  "pallet-relayer-set",
  "pallet-session",
  "pallet-staking",
+ "pallet-storage-auto-renewal",
  "pallet-sudo",
  "pallet-timestamp",
  "pallet-transaction-payment",
@@ -2180,6 +2181,7 @@ dependencies = [
  "pallet-message-queue",
  "pallet-session",
  "pallet-skip-feeless-payment",
+ "pallet-storage-auto-renewal",
  "pallet-sudo",
  "pallet-timestamp",
  "pallet-transaction-payment",
@@ -9036,6 +9038,19 @@ dependencies = [
  "sp-core",
  "sp-io",
  "sp-runtime",
+]
+
+[[package]]
+name = "pallet-storage-auto-renewal"
+version = "0.1.0"
+dependencies = [
+ "pallet-transaction-storage",
+ "pallets-common",
+ "parity-scale-codec",
+ "polkadot-sdk-frame",
+ "scale-info",
+ "tracing",
+ "transaction-storage-primitives",
 ]
 
 [[package]]

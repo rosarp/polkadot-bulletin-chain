@@ -175,27 +175,6 @@ impl<T: frame_system::Config> pallet_transaction_storage::WeightInfo for WeightI
 		.saturating_add(T::DbWeight::get().reads(1))
 		.saturating_add(T::DbWeight::get().writes(1))
 	}
-	// TODO: update weights
-	fn process_auto_renewals(n: u32) -> Weight {
-		Weight::from_parts(100_000_000, 0)
-			.saturating_add(Weight::from_parts(0, 40351))
-			.saturating_add(T::DbWeight::get().reads(5).saturating_mul(n as u64))
-			.saturating_add(T::DbWeight::get().writes(3).saturating_mul(n as u64))
-	}
-	// TODO: update weights
-	fn enable_auto_renew() -> Weight {
-		Weight::from_parts(10_000_000, 0)
-			.saturating_add(Weight::from_parts(0, 1000))
-			.saturating_add(T::DbWeight::get().reads(2))
-			.saturating_add(T::DbWeight::get().writes(1))
-	}
-	// TODO: update weights
-	fn disable_auto_renew() -> Weight {
-		Weight::from_parts(10_000_000, 0)
-			.saturating_add(Weight::from_parts(0, 1000))
-			.saturating_add(T::DbWeight::get().reads(1))
-			.saturating_add(T::DbWeight::get().writes(1))
-	}
 	/// Storage: `TransactionStorage::BlockTransactions` (r:1 w:0)
 	/// Proof: `TransactionStorage::BlockTransactions` (`max_values`: Some(1), `max_size`: Some(41474), added: 41969, mode: `MaxEncodedLen`)
 	/// Storage: `TransactionStorage::Authorizations` (r:2 w:2)

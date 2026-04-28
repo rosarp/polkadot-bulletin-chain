@@ -107,4 +107,12 @@ impl pallet_transaction_storage::Config for Runtime {
 	type StoreRenewLongevity = StoreRenewLongevity;
 	type RemoveExpiredAuthorizationPriority = RemoveExpiredAuthorizationPriority;
 	type RemoveExpiredAuthorizationLongevity = RemoveExpiredAuthorizationLongevity;
+	type OnTransactionExpiring = crate::StorageAutoRenewal;
+}
+
+impl pallet_storage_auto_renewal::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type WeightInfo = crate::weights::pallet_storage_auto_renewal::WeightInfo<Runtime>;
+	type MaxBlockTransactions = crate::ConstU32<512>;
+	type StorageRenewer = crate::TransactionStorage;
 }

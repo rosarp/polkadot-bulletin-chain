@@ -55,6 +55,7 @@ frame-system-benchmarking = { workspace = true, optional = true }
 
 # Local dependencies
 pallet-relayer-set = { workspace = true }
+pallet-storage-auto-renewal = { workspace = true }
 pallet-transaction-storage = { workspace = true }
 pallet-validator-set = { workspace = true }
 pallets-common = { workspace = true }
@@ -145,6 +146,7 @@ std = [
 	"frame-system-benchmarking?/std",
 
 	"pallet-relayer-set/std",
+	"pallet-storage-auto-renewal/std",
 	"pallet-transaction-payment-rpc-runtime-api/std",
 	"pallet-transaction-payment/std",
 	"pallet-transaction-storage/std",
@@ -203,6 +205,7 @@ runtime-benchmarks = [
 
 	"pallet-relayer-set/runtime-benchmarks",
 	"pallet-session/runtime-benchmarks",
+	"pallet-storage-auto-renewal/runtime-benchmarks",
 	"pallet-transaction-payment/runtime-benchmarks",
 	"pallet-transaction-storage/runtime-benchmarks",
 	"pallet-validator-set/runtime-benchmarks",
@@ -241,6 +244,7 @@ try-runtime = [
 	"pallet-bridge-relayers/try-runtime",
 	"pallet-relayer-set/try-runtime",
 	"pallet-staking/try-runtime",
+	"pallet-storage-auto-renewal/try-runtime",
 	"pallet-transaction-payment/try-runtime",
 	"pallet-transaction-storage/try-runtime",
 	"pallet-validator-set/try-runtime",
