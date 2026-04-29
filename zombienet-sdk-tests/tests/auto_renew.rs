@@ -78,7 +78,7 @@ async fn enable_auto_renew(
 ) -> Result<()> {
 	let signer = dev::alice();
 	let call = tx(
-		"TransactionStorage",
+		"StorageAutoRenewal",
 		"enable_auto_renew",
 		vec![Value::from_bytes(content_hash.as_slice())],
 	);
@@ -117,7 +117,7 @@ async fn wait_for_data_auto_renewed(
 
 			for event in events.iter() {
 				let event = event?;
-				if event.pallet_name() == "TransactionStorage" &&
+				if event.pallet_name() == "StorageAutoRenewal" &&
 					event.variant_name() == "DataAutoRenewed"
 				{
 					log::info!("DataAutoRenewed event at block {}", block_number);
