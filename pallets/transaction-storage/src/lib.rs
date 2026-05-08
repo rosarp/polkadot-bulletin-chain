@@ -1282,8 +1282,9 @@ pub mod pallet {
 		///
 		/// Batches the [`BlockTransactions`] read/write across all `n` renewals by threading
 		/// an in-memory accumulator through repeated [`Self::do_renew_in_memory`] calls.
-		/// A naive `do_renew`-per-item loop would re-encode the full vec per iteration
-		/// (O(n²)), which a linear weight model underestimates by ~17% at saturation.
+		/// A naive [`Self::do_renew`]-per-item loop would re-encode the full vec per
+		/// iteration (O(n²)), which a linear weight model underestimates by ~17% at
+		/// saturation.
 		///
 		/// **Failure handling.** A pending renewal is treated as failed (the registration
 		/// is removed from [`AutoRenewals`] and [`Event::AutoRenewalFailed`] is emitted)
@@ -1296,11 +1297,9 @@ pub mod pallet {
 		/// - [`Self::do_renew_in_memory`] returns `None` because the per-block transaction slot cap
 		///   (`MaxBlockTransactions`) is reached.
 		///
-		/// On failure the data is **gone**: the same `on_initialize` that queued the
-		/// pending renewal already `take`-d the obsolete `Transactions` entry and cleared
-		/// [`TransactionByContentHash`]. The caller cannot re-`enable_auto_renew` because
-		/// the content hash no longer resolves to a stored entry — to keep the data alive
-		/// they must re-`store` it first.
+		/// In all cases the on-chain data is left to expire normally on its existing
+		/// `RetentionPeriod` clock; the caller may re-`enable_auto_renew` once the
+		/// constraint clears.
 		pub(super) fn do_process_auto_renewals() -> u32 {
 			let pending = PendingAutoRenewals::<T>::take();
 			let n_actual = pending.len() as u32;
@@ -1505,8 +1504,8 @@ pub mod pallet {
 		/// [`renew_content_hash`](Self::renew_content_hash) dispatchables.
 		///
 		/// Wraps [`Self::do_renew_in_memory`] (the centralized renewal mechanics) with a
-		/// [`BlockTransactions`] read/write. Auto-renewals do not go through this wrapper
-		/// — [`Self::do_process_auto_renewals`] amortizes a single read/write across the
+		/// [`BlockTransactions`] read/write. Auto-renewals do not go through this wrapper —
+		/// [`Self::do_process_auto_renewals`] amortizes a single read/write across the
 		/// whole drain loop instead.
 		///
 		/// Hard-cap accounting (per-account `bytes_permanent`, chain-wide
