@@ -67,9 +67,9 @@ impl<T: frame_system::Config> pallet_bulletin_transaction_storage::WeightInfo fo
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(2))
 	}
-	/// Placeholder weight for the new one-shot `renew` scheduler. Reuses the
+	/// Placeholder weight for the one-shot `renew` scheduler. Reuses the
 	/// `enable_auto_renew` envelope (same storage operations: read Transactions,
-	/// read/write AutoRenewals). Re-benchmark once stable.
+	/// read/write AutoRenewals).
 	fn renew() -> Weight {
 		<Self as pallet_bulletin_transaction_storage::WeightInfo>::enable_auto_renew()
 	}

@@ -76,10 +76,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(1))
 			.saturating_add(T::DbWeight::get().writes(2))
 	}
-	/// Placeholder weight for the new (one-shot scheduler) `renew`. Reads
-	/// `Transactions` to derive the size + content hash, reads `AutoRenewals` for the
-	/// conflict check, writes `AutoRenewals` for the registration. Until re-benchmarked,
-	/// borrow `enable_auto_renew`'s envelope — same storage operations.
+	/// Placeholder weight for the one-shot scheduler `renew`. Reads `Transactions`
+	/// to derive the size + content hash, reads `AutoRenewals` for the conflict
+	/// check, writes `AutoRenewals` for the registration. Borrows
+	/// `enable_auto_renew`'s envelope — same storage operations.
 	fn renew() -> Weight {
 		<Self as WeightInfo>::enable_auto_renew()
 	}

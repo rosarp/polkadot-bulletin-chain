@@ -510,7 +510,7 @@ pub mod pallet {
 		///
 		/// Emits [`OneShotRenewalScheduled`](Event::OneShotRenewalScheduled) when successful.
 		///
-		/// For the previous behaviour (immediate renewal at dispatch time), see
+		/// For synchronous renewal at dispatch time, see
 		/// [`force_renew`](Self::force_renew).
 		#[pallet::call_index(1)]
 		#[pallet::weight(T::WeightInfo::renew())]
@@ -533,7 +533,7 @@ pub mod pallet {
 			Ok(())
 		}
 
-		/// Immediately renew previously stored data — the legacy `renew` semantics.
+		/// Immediately renew previously stored data, synchronous at dispatch time.
 		///
 		/// `(block, index)` identifies the data to renew. The renewal is executed in this
 		/// extrinsic's block (a new `TransactionInfo { kind: Renew, .. }` is pushed onto
@@ -2132,9 +2132,10 @@ pub mod pallet {
 					(info.size as usize, info.content_hash, true)
 				},
 				Call::<T>::renew { block, index } => {
-					// One-shot registration. Same pattern as `enable_auto_renew`: feeless,
-					// auth validation + 1-tx-slot consumption happen here in `check_signed`;
-					// the dispatch body only writes `AutoRenewals[hash]`.
+					// Feeless one-shot registration. Validates the snapshot precondition
+					// (auth exists, unexpired, has room for one more renewal of
+					// `info.size`) and consumes one tx slot as the registration fee.
+					// The dispatch body writes `AutoRenewals[hash]` and emits the event.
 					let info = Self::transaction_info(*block, *index).ok_or(RENEWED_NOT_FOUND)?;
 
 					let auth = Authorizations::<T>::get(AuthorizationScope::Account(who.clone()))
@@ -2145,9 +2146,10 @@ pub mod pallet {
 						return Err(AUTHORIZATION_NOT_FOUND.into());
 					}
 
-					// `size = 0, is_renew = false` → consume one tx slot only. Bytes and the
-					// chain-wide `PermanentStorageUsed` counter are left alone; they are
-					// charged on the eventual renewal cycle by `do_process_auto_renewals`.
+					// `size = 0, is_renew = false`: only the tx counter is charged.
+					// `bytes_permanent` and the chain-wide `PermanentStorageUsed`
+					// counter are charged on the eventual renewal cycle by
+					// `do_process_auto_renewals`.
 					Self::check_authorization(
 						&AuthorizationScope::Account(who.clone()),
 						0,
@@ -2160,7 +2162,6 @@ pub mod pallet {
 							longevity: T::StoreRenewLongevity::get(),
 							..Default::default()
 						}),
-						// No origin rewrite — dispatch keeps `ensure_signed`.
 						None,
 					));
 				},

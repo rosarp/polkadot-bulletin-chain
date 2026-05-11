@@ -576,10 +576,9 @@ pub mod v3 {
 				};
 
 				let Some(block_number) = iter.next() else {
-					// Each migration writes its own `version_to` (not
-					// `in_code_storage_version`), so that when multiple migrations are
-					// chained (v3→v4 here) the on-chain version progresses one step at a
-					// time and downstream migrations see the correct starting version.
+					// Write this migration's `version_to` explicitly so that when
+					// chained with v3→v4 the on-chain version progresses one step at
+					// a time and the next migration sees the correct starting version.
 					polkadot_sdk_frame::deps::frame_support::traits::StorageVersion::new(3)
 						.put::<Pallet<T>>();
 					cursor = None;
