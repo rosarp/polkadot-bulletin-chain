@@ -1014,12 +1014,8 @@ pub mod pallet {
 		AuthorizerRemoved { who: T::AccountId },
 		/// An authorizer was removed from the allowed list due to budget exhaustion.
 		ExhaustedAuthorizerRemoved { who: T::AccountId },
-		/// Auto-renewal (forever) was enabled for `content_hash` by `who`.
-		AutoRenewalEnabled { content_hash: ContentHash, who: T::AccountId },
-		/// A **one-shot** renewal of `content_hash` was scheduled by `who` (via
-		/// [`Pallet::renew`]). The renewal fires once at the next `RetentionPeriod`
-		/// boundary, and the registration is then removed.
-		OneShotRenewalScheduled { content_hash: ContentHash, who: T::AccountId },
+		/// A renewal was enabled for `content_hash` by `who`.
+		RenewalEnabled { content_hash: ContentHash, who: T::AccountId, recurring: bool },
 		/// Auto-renewal was disabled for `content_hash` by `who`.
 		AutoRenewalDisabled { content_hash: ContentHash, who: T::AccountId },
 		/// Data was automatically renewed at `index` with `content_hash` for `account`.
