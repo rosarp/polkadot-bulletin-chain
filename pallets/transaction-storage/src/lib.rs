@@ -508,7 +508,7 @@ pub mod pallet {
 		/// Rejects with [`AutoRenewalAlreadyEnabled`](Error::AutoRenewalAlreadyEnabled) if
 		/// the same content hash already has a scheduled renewal (one-shot or recurring).
 		///
-		/// Emits [`OneShotRenewalScheduled`](Event::OneShotRenewalScheduled) when successful.
+		/// Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: false }` when successful.
 		///
 		/// For synchronous renewal at dispatch time, see
 		/// [`force_renew`](Self::force_renew).
@@ -529,7 +529,7 @@ pub mod pallet {
 				content_hash,
 				RenewalData { account: who.clone(), recurring: false },
 			);
-			Self::deposit_event(Event::OneShotRenewalScheduled { content_hash, who });
+			Self::deposit_event(Event::RenewalEnabled { content_hash, who, recurring: false });
 			Ok(())
 		}
 
@@ -801,7 +801,7 @@ pub mod pallet {
 		/// (`PermanentStorageUsed + size <= MaxPermanentStorageSize`).
 		///
 		/// Emits [`Renewed`](Event::Renewed) for the immediate renewal and
-		/// [`AutoRenewalEnabled`](Event::AutoRenewalEnabled) for the registration.
+		/// [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: true }` for the registration.
 		#[pallet::call_index(12)]
 		#[pallet::weight(T::WeightInfo::enable_auto_renew())]
 		#[pallet::feeless_if(|_origin: &OriginFor<T>, _content_hash: &ContentHash| -> bool { true })]
@@ -830,7 +830,7 @@ pub mod pallet {
 				content_hash,
 				RenewalData { account: who.clone(), recurring: true },
 			);
-			Self::deposit_event(Event::AutoRenewalEnabled { content_hash, who });
+			Self::deposit_event(Event::RenewalEnabled { content_hash, who, recurring: true });
 			Ok(())
 		}
 

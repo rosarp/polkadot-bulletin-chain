@@ -2008,9 +2008,10 @@ fn enable_auto_renew_works() {
 		assert_eq!(renewal_data.account, who);
 
 		// Verify event
-		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::AutoRenewalEnabled {
+		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::RenewalEnabled {
 			content_hash,
 			who,
+			recurring: true,
 		}));
 
 		// Enabling again must be rejected at pre-dispatch (before bytes are
@@ -2456,9 +2457,10 @@ fn auto_renew_permissionless_transfer() {
 		let renewal = AutoRenewals::get(content_hash).unwrap();
 		assert_eq!(renewal.account, bob, "Bob should now own the auto-renewal");
 
-		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::AutoRenewalEnabled {
+		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::RenewalEnabled {
 			content_hash,
 			who: bob,
+			recurring: true,
 		}));
 	});
 }
@@ -2559,7 +2561,7 @@ fn process_auto_renewals_continues_on_per_item_failure() {
 }
 
 /// `renew` registers a one-shot renewal — `AutoRenewals[hash]` is created with
-/// `recurring = false` and the new `OneShotRenewalScheduled` event fires.
+/// `recurring = false` and `RenewalEnabled { recurring: false }` fires.
 #[test]
 fn renew_schedules_one_shot() {
 	new_test_ext().execute_with(|| {
@@ -2578,9 +2580,11 @@ fn renew_schedules_one_shot() {
 		assert_eq!(entry.account, who);
 		assert!(!entry.recurring, "renew should register a one-shot entry");
 
-		System::assert_has_event(RuntimeEvent::TransactionStorage(
-			Event::OneShotRenewalScheduled { content_hash, who },
-		));
+		System::assert_has_event(RuntimeEvent::TransactionStorage(Event::RenewalEnabled {
+			content_hash,
+			who,
+			recurring: false,
+		}));
 	});
 }
 
@@ -2640,10 +2644,11 @@ fn renew_and_enable_auto_renew_conflict() {
 			Error::AutoRenewalAlreadyEnabled,
 		);
 
-		// `enable_auto_renew` for the same hash: also rejected.
-		assert_noop!(
-			TransactionStorage::enable_auto_renew(RuntimeOrigin::signed(who), content_hash),
-			Error::AutoRenewalAlreadyEnabled,
+		// `enable_auto_renew` for the same hash: also rejected (at the extension).
+		let call = Call::enable_auto_renew { content_hash };
+		assert_eq!(
+			TransactionStorage::validate_signed(&who, &call).map(|_| ()),
+			Err(crate::AUTO_RENEWAL_ALREADY_ENABLED.into()),
 		);
 	});
 }

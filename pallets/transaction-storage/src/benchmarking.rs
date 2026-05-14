@@ -182,7 +182,9 @@ mod benchmarks {
 		#[extrinsic_call]
 		_(RawOrigin::Signed(caller.clone()), BlockNumberFor::<T>::zero(), 0);
 
-		assert_last_event::<T>(Event::OneShotRenewalScheduled { content_hash, who: caller }.into());
+		assert_last_event::<T>(
+			Event::RenewalEnabled { content_hash, who: caller, recurring: false }.into(),
+		);
 		Ok(())
 	}
 
@@ -471,7 +473,9 @@ mod benchmarks {
 		#[extrinsic_call]
 		_(RawOrigin::Signed(caller.clone()), content_hash);
 
-		assert_last_event::<T>(Event::AutoRenewalEnabled { content_hash, who: caller }.into());
+		assert_last_event::<T>(
+			Event::RenewalEnabled { content_hash, who: caller, recurring: true }.into(),
+		);
 		Ok(())
 	}
 
