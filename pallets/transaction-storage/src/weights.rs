@@ -54,6 +54,7 @@ pub trait WeightInfo {
 	fn remove_exhausted_authorizer() -> Weight;
 	fn migrate_v2_to_v3_step() -> Weight;
 	fn migrate_v3_to_v4_step() -> Weight;
+	fn migrate_v4_to_v5_step() -> Weight;
 }
 
 /// Weights for pallet_bulletin_transaction_storage using the Substrate node and recommended hardware.
@@ -384,6 +385,15 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
+	/// Worst-case weight for one outer-loop iteration of the v4→v5 multi-block
+	/// migration: 4 reads (iterator + AutoRenewals decode + TransactionByContentHash +
+	/// Transactions row) + 1 write (AccountActiveAutoRenewals upsert) per entry.
+	/// Placeholder until benchmarked.
+	fn migrate_v4_to_v5_step() -> Weight {
+		Weight::from_parts(12_000_000, 1_000)
+			.saturating_add(T::DbWeight::get().reads(4))
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
 }
 
 // For backwards compatibility and tests
@@ -516,6 +526,11 @@ impl WeightInfo for () {
 	fn migrate_v3_to_v4_step() -> Weight {
 		Weight::from_parts(10_000_000, 1_000)
 			.saturating_add(RocksDbWeight::get().reads(2))
+			.saturating_add(RocksDbWeight::get().writes(1))
+	}
+	fn migrate_v4_to_v5_step() -> Weight {
+		Weight::from_parts(12_000_000, 1_000)
+			.saturating_add(RocksDbWeight::get().reads(4))
 			.saturating_add(RocksDbWeight::get().writes(1))
 	}
 }

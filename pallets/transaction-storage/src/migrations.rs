@@ -844,3 +844,140 @@ pub mod v4 {
 		}
 	}
 }
+
+/// Storage version 5 — back-fill [`AccountActiveAutoRenewals`] from the v4
+/// [`AutoRenewals`] map so the register-time projection check (`extent + active
+/// + new ≤ allowance`) starts with a correct per-account summary.
+///
+/// For every existing `AutoRenewals[hash]` entry we read the registered size
+/// from `TransactionByContentHash[hash]` → `Transactions[(block, idx)]` and
+/// add `(1, size)` to `AccountActiveAutoRenewals[account]`. Stepped because the
+/// number of registrations is unbounded.
+pub mod v5 {
+	use super::*;
+	use crate::{
+		pallet::{AccountActiveAutoRenewals, AutoRenewals, Pallet},
+		Config, TransactionByContentHash, Transactions, WeightInfo,
+	};
+	use bulletin_transaction_storage_primitives::ContentHash;
+	use polkadot_sdk_frame::deps::frame_support::{
+		migrations::{MigrationId, SteppedMigration, SteppedMigrationError},
+		weights::WeightMeter,
+	};
+	#[cfg(feature = "try-runtime")]
+	use polkadot_sdk_frame::deps::sp_io;
+
+	const MIGRATIONS_ID: &[u8; 24] = b"bulletin-tx-storage-vmig";
+
+	/// Stepped migration from storage version 4 to 5.
+	pub struct MigrateV4ToV5<T: Config>(PhantomData<T>);
+
+	impl<T: Config> SteppedMigration for MigrateV4ToV5<T> {
+		type Cursor = ContentHash;
+		type Identifier = MigrationId<24>;
+
+		fn id() -> Self::Identifier {
+			MigrationId { pallet_id: *MIGRATIONS_ID, version_from: 4, version_to: 5 }
+		}
+
+		fn step(
+			mut cursor: Option<Self::Cursor>,
+			meter: &mut WeightMeter,
+		) -> Result<Option<Self::Cursor>, SteppedMigrationError> {
+			let required = T::WeightInfo::migrate_v4_to_v5_step();
+			if meter.remaining().any_lt(required) {
+				return Err(SteppedMigrationError::InsufficientWeight { required });
+			}
+
+			loop {
+				if meter.try_consume(required).is_err() {
+					break;
+				}
+
+				let mut iter = match cursor.as_ref() {
+					None => AutoRenewals::<T>::iter(),
+					Some(last) =>
+						AutoRenewals::<T>::iter_from(AutoRenewals::<T>::hashed_key_for(last)),
+				};
+
+				let Some((content_hash, renewal_data)) = iter.next() else {
+					polkadot_sdk_frame::deps::frame_support::traits::StorageVersion::new(5)
+						.put::<Pallet<T>>();
+					cursor = None;
+					break;
+				};
+
+				// Resolve the registered size via TransactionByContentHash + Transactions.
+				// `AutoRenewals` is only ever inserted alongside a live entry, so this
+				// lookup is expected to succeed; on miss, fall back to a 0-byte entry
+				// so the count still tracks and the invariant remains conservative.
+				let size = TransactionByContentHash::<T>::get(content_hash)
+					.and_then(|(block, idx)| {
+						Transactions::<T>::get(block)
+							.and_then(|txs| txs.into_iter().nth(idx as usize))
+					})
+					.map(|info| info.size as u64)
+					.unwrap_or(0);
+
+				AccountActiveAutoRenewals::<T>::mutate(&renewal_data.account, |active| {
+					active.count = active.count.saturating_add(1);
+					active.total_bytes = active.total_bytes.saturating_add(size);
+				});
+				cursor = Some(content_hash);
+			}
+
+			Ok(cursor)
+		}
+
+		#[cfg(feature = "try-runtime")]
+		fn pre_upgrade() -> Result<Vec<u8>, polkadot_sdk_frame::deps::sp_runtime::TryRuntimeError> {
+			use polkadot_sdk_frame::deps::frame_support::storage::StoragePrefixedMap;
+			let prefix = AutoRenewals::<T>::final_prefix();
+			let mut previous_key = prefix.to_vec();
+			let mut count: u64 = 0;
+			while let Some(key) =
+				sp_io::storage::next_key(&previous_key).filter(|k| k.starts_with(&prefix))
+			{
+				previous_key = key;
+				count += 1;
+			}
+			tracing::info!(target: LOG_TARGET, count, "v4->v5 pre_upgrade: AutoRenewals entries");
+			Ok(count.encode())
+		}
+
+		#[cfg(feature = "try-runtime")]
+		fn post_upgrade(
+			state: Vec<u8>,
+		) -> Result<(), polkadot_sdk_frame::deps::sp_runtime::TryRuntimeError> {
+			let _old_count =
+				u64::decode(&mut &state[..]).map_err(|_| "Failed to decode pre_upgrade state")?;
+
+			// Recompute the invariant: AccountActiveAutoRenewals[a] equals (count, sum size)
+			// of AutoRenewals entries with account == a.
+			let mut rebuilt: alloc::collections::BTreeMap<T::AccountId, (u32, u64)> =
+				Default::default();
+			for (content_hash, renewal_data) in AutoRenewals::<T>::iter() {
+				let size = TransactionByContentHash::<T>::get(content_hash)
+					.and_then(|(block, idx)| {
+						Transactions::<T>::get(block)
+							.and_then(|txs| txs.into_iter().nth(idx as usize))
+					})
+					.map(|info| info.size as u64)
+					.unwrap_or(0);
+				let entry = rebuilt.entry(renewal_data.account).or_insert((0, 0));
+				entry.0 = entry.0.saturating_add(1);
+				entry.1 = entry.1.saturating_add(size);
+			}
+
+			for (account, (count, total_bytes)) in rebuilt {
+				let stored = AccountActiveAutoRenewals::<T>::get(&account);
+				polkadot_sdk_frame::prelude::ensure!(
+					stored.count == count && stored.total_bytes == total_bytes,
+					"v4->v5 post_upgrade: AccountActiveAutoRenewals mismatch",
+				);
+			}
+
+			Ok(())
+		}
+	}
+}

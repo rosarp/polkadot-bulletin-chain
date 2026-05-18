@@ -74,6 +74,24 @@ impl AuthorizationExtent {
 	}
 }
 
+/// Per-account denormalized summary of [`crate::AutoRenewals`]: the count and
+/// byte-sum of registrations currently owned by the account. Maintained by
+/// [`Pallet::enable_auto_renew`] / [`Pallet::renew`] /
+/// [`Pallet::disable_auto_renew`] / [`Pallet::do_process_auto_renewals`] so the
+/// register-time projection check stays O(1).
+///
+/// **Invariant**: equals `count` and `Σ size` of [`crate::AutoRenewals`] entries
+/// whose `account == this account`.
+#[derive(
+	Copy, Clone, PartialEq, Eq, Debug, Default, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen,
+)]
+pub struct ActiveAutoRenewals {
+	/// Number of registrations currently held.
+	pub count: u32,
+	/// Sum of `size` across those registrations.
+	pub total_bytes: u64,
+}
+
 /// The scope of an authorization.
 ///
 /// This type is used both for storage keys and to indicate which authorization

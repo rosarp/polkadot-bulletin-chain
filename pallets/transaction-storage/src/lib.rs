@@ -105,6 +105,10 @@ pub const AUTO_RENEWAL_NOT_ENABLED: InvalidTransaction = InvalidTransaction::Cus
 pub const NOT_AUTO_RENEWAL_OWNER: InvalidTransaction = InvalidTransaction::Custom(10);
 /// `enable_auto_renew`: an auto-renewal is already registered for this content hash.
 pub const AUTO_RENEWAL_ALREADY_ENABLED: InvalidTransaction = InvalidTransaction::Custom(11);
+/// Renew rejected: the projection `extent.transactions + active.count + 1` would
+/// exceed `transactions_allowance` (per-account hard cap on registered + executed
+/// renewals combined).
+pub const TX_ALLOWANCE_EXCEEDED: InvalidTransaction = InvalidTransaction::Custom(12);
 
 /// Percent of `MaxPermanentStorageSize` at which the pallet emits
 /// [`Event::PermanentStorageNearCap`] (rising-edge only). Off-chain governance consumers
@@ -244,7 +248,7 @@ pub mod pallet {
 		InsufficientAuthorizerBudget,
 	}
 
-	const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(5);
 
 	#[pallet::pallet]
 	#[pallet::storage_version(STORAGE_VERSION)]
@@ -333,18 +337,14 @@ pub mod pallet {
 							renewed_sum = renewed_sum.saturating_add(tx_info.size as u64);
 						}
 
-						// Only act on this entry if it is the latest reference for `hash`:
-						// a newer `store`/`renew` (or the force-renew inside
-						// `enable_auto_renew`) may have moved `TransactionByContentHash` to a
-						// later block, in which case this is a stale shadow entry that should
-						// not trigger cleanup or re-schedule auto-renewal — the later entry's
-						// own expiry will.
-						let is_latest = TransactionByContentHash::<T>::get(hash)
-							.is_some_and(|(block, _)| block == obsolete);
-						if !is_latest {
-							continue;
+						// Only remove TransactionByContentHash if this entry still points to
+						// the obsolete block (otherwise the entry has been re-stored or
+						// renewed elsewhere and points at a different block).
+						if let Some((block, _)) = TransactionByContentHash::<T>::get(hash) {
+							if block == obsolete {
+								TransactionByContentHash::<T>::remove(hash);
+							}
 						}
-						TransactionByContentHash::<T>::remove(hash);
 						// `try_push` cannot overflow: `pending` is empty per `on_finalize`'s
 						// drain invariant, and `transactions.len() <= MaxBlockTransactions`.
 						if let Some(renewal_data) = AutoRenewals::<T>::get(hash) {
@@ -516,7 +516,13 @@ pub mod pallet {
 		#[pallet::weight(T::WeightInfo::renew())]
 		#[pallet::feeless_if(|_origin: &OriginFor<T>, _block: &BlockNumberFor<T>, _index: &u32| -> bool { true })]
 		pub fn renew(origin: OriginFor<T>, block: BlockNumberFor<T>, index: u32) -> DispatchResult {
-			let who = ensure_signed(origin)?;
+			// Gate on `ensure_authorized`: the extension's `check_signed` returns
+			// `Some(Account(who))` so the origin is rewritten to `Origin::Authorized`
+			// before dispatch, matching `store` / `force_renew` / `renew_content_hash`.
+			let AuthorizedCaller::Signed { who, scope: _ } = Self::ensure_authorized(origin)?
+			else {
+				return Err(DispatchError::BadOrigin);
+			};
 			let info = Self::transaction_info(block, index).ok_or(Error::<T>::RenewedNotFound)?;
 			let content_hash = info.content_hash;
 
@@ -529,6 +535,7 @@ pub mod pallet {
 				content_hash,
 				RenewalData { account: who.clone(), recurring: false },
 			);
+			Self::reserve_account_active(&who, info.size as u64);
 			Self::deposit_event(Event::RenewalEnabled { content_hash, who, recurring: false });
 			Ok(())
 		}
@@ -754,9 +761,13 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			content_hash: ContentHash,
 		) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			// Verify the content hash refers to currently-stored data.
-			TransactionByContentHash::<T>::get(content_hash).ok_or(Error::<T>::RenewedNotFound)?;
+			let AuthorizedCaller::Signed { who, scope: _ } = Self::ensure_authorized(origin)?
+			else {
+				return Err(DispatchError::BadOrigin);
+			};
+			// Resolve the entry so we know its size for the active-summary bump.
+			let info = Self::resolve_transaction_ref(&TransactionRef::ContentHash(content_hash))
+				.map_err(|_| Error::<T>::RenewedNotFound)?;
 
 			ensure!(
 				!AutoRenewals::<T>::contains_key(content_hash),
@@ -767,28 +778,33 @@ pub mod pallet {
 				content_hash,
 				RenewalData { account: who.clone(), recurring: false },
 			);
+			Self::reserve_account_active(&who, info.size as u64);
 			Self::deposit_event(Event::RenewalEnabled { content_hash, who, recurring: false });
 			Ok(())
 		}
 
-		/// Enable automatic renewal for a previously stored piece of data.
+		/// Enable recurring automatic renewal of previously stored data.
 		///
-		/// Force-renew + schedule. This call combines a regular renewal (paid up
-		/// front against the caller's account authorization) with a registration in
-		/// [`AutoRenewals`]. Bytes and one tx slot are charged here via the
-		/// extension's `check_signed`, the renewal entry is added to
-		/// [`BlockTransactions`] by [`Self::do_renew`], and future renewal cycles
-		/// fire from [`Self::do_process_auto_renewals`] when the renewed entry
-		/// expires. Bounding the registration against the renew hard cap (rather
-		/// than a free snapshot check) means a caller cannot register more
-		/// auto-renewals than `bytes_allowance` supports.
+		/// "Register reserves, cycle pays": the registration itself does **not**
+		/// renew the data and does not consume `bytes_permanent`. It only inserts an
+		/// entry into [`AutoRenewals`] (with `recurring: true`) and bumps the
+		/// caller's [`AccountActiveAutoRenewals`] summary by `(1, info.size)`. The
+		/// register-time projection check in `check_signed`
+		/// (`extent + active + new ≤ allowance` on both axes) bounds how many
+		/// registrations the caller can hold against their current authorization
+		/// envelope. Each subsequent retention boundary fires a real renewal via
+		/// [`Self::do_process_auto_renewals`], which charges `bytes_permanent`,
+		/// `PermanentStorageUsed`, and one tx slot under the standard
+		/// [`Self::check_authorization`] hard caps.
 		///
-		/// Feeless: no token fee. Spam is bounded by the per-account renew quota
-		/// (`bytes_permanent + size <= bytes_allowance`) and the chain-wide cap
-		/// (`PermanentStorageUsed + size <= MaxPermanentStorageSize`).
+		/// Auth refreshes reset `extent` but leave `AccountActiveAutoRenewals` in
+		/// place, so existing registrations keep firing against the fresh quota.
 		///
-		/// Emits [`Renewed`](Event::Renewed) for the immediate renewal and
-		/// [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: true }` for the registration.
+		/// Feeless. Rejects with
+		/// [`AutoRenewalAlreadyEnabled`](Error::AutoRenewalAlreadyEnabled) if the
+		/// hash already has any registration (one-shot or recurring).
+		///
+		/// Emits [`RenewalEnabled`](Event::RenewalEnabled) `{ recurring: true }`.
 		#[pallet::call_index(12)]
 		#[pallet::weight(T::WeightInfo::enable_auto_renew())]
 		#[pallet::feeless_if(|_origin: &OriginFor<T>, _content_hash: &ContentHash| -> bool { true })]
@@ -796,6 +812,8 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			content_hash: ContentHash,
 		) -> DispatchResult {
+			// Gate on `ensure_authorized` (origin was rewritten to `Origin::Authorized`
+			// by the extension's `check_signed`). Matches the other storage extrinsics.
 			let AuthorizedCaller::Signed { who, scope: _ } = Self::ensure_authorized(origin)?
 			else {
 				return Err(DispatchError::BadOrigin);
@@ -811,14 +829,11 @@ pub mod pallet {
 				.ok_or(Error::<T>::RenewedNotFound)?;
 			let info = Self::transaction_info(block, index).ok_or(Error::<T>::RenewedNotFound)?;
 
-			// TODO: this is doing on-shot or direct?
-			let new_index = Self::do_renew(info)?;
-			Self::deposit_event(Event::Renewed { index: new_index, content_hash });
-
 			AutoRenewals::<T>::insert(
 				content_hash,
 				RenewalData { account: who.clone(), recurring: true },
 			);
+			Self::reserve_account_active(&who, info.size as u64);
 			Self::deposit_event(Event::RenewalEnabled { content_hash, who, recurring: true });
 			Ok(())
 		}
@@ -851,7 +866,21 @@ pub mod pallet {
 				AuthorizedCaller::Unsigned => return Err(DispatchError::BadOrigin),
 			}
 
+			// Resolve the registered size so we can decrement the per-account active
+			// summary. `AutoRenewals[hash]` is only ever inserted alongside a live
+			// `TransactionByContentHash[hash]`, so this lookup is expected to succeed;
+			// the `unwrap_or(0)` is a defensive fallback that preserves the count
+			// decrement even if a future refactor relaxes that invariant.
+			let size = TransactionByContentHash::<T>::get(content_hash)
+				.and_then(|(b, i)| Self::transaction_info(b, i))
+				.map(|info| info.size as u64)
+				.unwrap_or(0);
+
 			AutoRenewals::<T>::remove(content_hash);
+			// Decrement against the *registered owner*, not the caller. Under the
+			// Root override the caller has no account; under Signed the owner check
+			// above guarantees `renewal_data.account == who`.
+			Self::release_account_active(&renewal_data.account, size);
 			Self::deposit_event(Event::AutoRenewalDisabled {
 				content_hash,
 				who: renewal_data.account,
@@ -1080,6 +1109,19 @@ pub mod pallet {
 	#[pallet::storage]
 	pub type AutoRenewals<T: Config> =
 		StorageMap<_, Blake2_128Concat, ContentHash, RenewalData<T::AccountId>, OptionQuery>;
+
+	/// Per-account denormalized summary of [`AutoRenewals`]: count + byte-sum of
+	/// registrations owned by the account. Used by the register-time projection
+	/// check (`extent + active + new ≤ allowance`) to bound how many auto-renewals
+	/// a caller can register against their current authorization envelope.
+	///
+	/// Maintained as `ValueQuery` so unknown accounts read as `Default` (zeroed),
+	/// which lets new accounts pass the projection check without an explicit insert.
+	/// Invariant: equals the count and `Σ size` of [`AutoRenewals`] entries whose
+	/// `account == this account`. Backfilled by the v4→v5 migration.
+	#[pallet::storage]
+	pub type AccountActiveAutoRenewals<T: Config> =
+		StorageMap<_, Blake2_128Concat, T::AccountId, ActiveAutoRenewals, ValueQuery>;
 
 	/// Transactions that must be auto-renewed in the current block.
 	///
@@ -1313,8 +1355,9 @@ pub mod pallet {
 				// Defensive: no extrinsic context means we can't index renewals; fail all
 				// rather than silently skip.
 				None => {
-					for (content_hash, _, renewal_data) in pending.into_iter() {
+					for (content_hash, tx_info, renewal_data) in pending.into_iter() {
 						AutoRenewals::<T>::remove(content_hash);
+						Self::release_account_active(&renewal_data.account, tx_info.size as u64);
 						Self::deposit_event(Event::AutoRenewalFailed {
 							content_hash,
 							account: renewal_data.account,
@@ -1335,10 +1378,13 @@ pub mod pallet {
 					};
 
 				if let Some(new_index) = new_index {
-					// One-shot registrations: remove now that the single renewal has fired.
-					// Recurring registrations stay in place to fire again next cycle.
+					// One-shot: remove the registration and free its reservation. Recurring:
+					// the registration stays in place and `AccountActiveAutoRenewals` is
+					// untouched — the same reservation continues to gate future cycles
+					// against `bytes_allowance`.
 					if !renewal_data.recurring {
 						AutoRenewals::<T>::remove(content_hash);
+						Self::release_account_active(&renewal_data.account, tx_info.size as u64);
 					}
 					Self::deposit_event(Event::DataAutoRenewed {
 						index: new_index,
@@ -1346,7 +1392,11 @@ pub mod pallet {
 						account: renewal_data.account,
 					});
 				} else {
+					// Cycle failed (auth gone, quota exhausted, chain cap, or block full):
+					// drop the registration so its reservation no longer counts against
+					// the projection check for future registrations.
 					AutoRenewals::<T>::remove(content_hash);
+					Self::release_account_active(&renewal_data.account, tx_info.size as u64);
 					Self::deposit_event(Event::AutoRenewalFailed {
 						content_hash,
 						account: renewal_data.account,
@@ -1863,6 +1913,69 @@ pub mod pallet {
 				.is_some_and(|len| len >= T::MaxBlockTransactions::get() as usize)
 		}
 
+		/// Reserve a new auto-renewal in [`AccountActiveAutoRenewals`] for `who`:
+		/// `(count, total_bytes) += (1, size)`. Pair with an [`AutoRenewals`] insert.
+		fn reserve_account_active(who: &T::AccountId, size: u64) {
+			AccountActiveAutoRenewals::<T>::mutate(who, |active| {
+				active.count = active.count.saturating_add(1);
+				active.total_bytes = active.total_bytes.saturating_add(size);
+			});
+		}
+
+		/// Release one auto-renewal reservation in [`AccountActiveAutoRenewals`]:
+		/// `(count, total_bytes) -= (1, size)` (saturating). Pair with an
+		/// [`AutoRenewals`] remove. Called from `disable_auto_renew`, one-shot cycle
+		/// success, and cycle failure.
+		fn release_account_active(who: &T::AccountId, size: u64) {
+			AccountActiveAutoRenewals::<T>::mutate(who, |active| {
+				active.count = active.count.saturating_sub(1);
+				active.total_bytes = active.total_bytes.saturating_sub(size);
+			});
+		}
+
+		/// Register-time projection check.
+		///
+		/// Verifies that adding one renewal registration of `size` bytes for `who`
+		/// would keep the account inside both hard caps once the executed-extent and
+		/// the active reservations are combined:
+		///
+		/// ```text
+		/// extent.transactions    + active.count       + 1     ≤ transactions_allowance
+		/// extent.bytes_permanent + active.total_bytes + size  ≤ bytes_allowance
+		/// ```
+		///
+		/// Auth must exist and be unexpired. **No state is mutated** — the caller is
+		/// expected to bump [`AccountActiveAutoRenewals`] after a successful insert
+		/// into [`AutoRenewals`]. Used by [`Self::renew`], [`Self::enable_auto_renew`],
+		/// and [`Self::force_renew`]; the cycle path keeps the standard
+		/// [`Self::check_authorization`].
+		fn check_account_projection(
+			who: &T::AccountId,
+			size: u64,
+		) -> Result<(), TransactionValidityError> {
+			let auth = Authorizations::<T>::get(AuthorizationScope::Account(who.clone()))
+				.ok_or(AUTHORIZATION_NOT_FOUND)?;
+			if auth.expired(Self::now()) {
+				return Err(AUTHORIZATION_NOT_FOUND.into());
+			}
+			let active = AccountActiveAutoRenewals::<T>::get(who);
+			if auth.extent.transactions.saturating_add(active.count).saturating_add(1) >
+				auth.extent.transactions_allowance
+			{
+				return Err(TX_ALLOWANCE_EXCEEDED.into());
+			}
+			if auth
+				.extent
+				.bytes_permanent
+				.saturating_add(active.total_bytes)
+				.saturating_add(size) >
+				auth.extent.bytes_allowance
+			{
+				return Err(PERMANENT_ALLOWANCE_EXCEEDED.into());
+			}
+			Ok(())
+		}
+
 		/// Check that authorization exists for data of the given size.
 		///
 		/// Always rejects if the authorization entry is missing or expired.
@@ -1998,7 +2111,12 @@ pub mod pallet {
 		}
 
 		/// Shared pool validation for the signed one-shot scheduler calls
-		/// (`renew`, `renew_content_hash`): snapshot auth check, then consume one tx slot.
+		/// (`renew`, `renew_content_hash`): projection check + origin rewrite.
+		///
+		/// Returns `Some(Account(who))` so the extension rewrites the origin to
+		/// `Origin::Authorized`; dispatch then gates on `ensure_authorized`,
+		/// matching `store` / `force_renew`. No extent mutation here — the
+		/// eventual renewal cycle charges via `do_process_auto_renewals`.
 		fn validate_signed_one_shot_renew(
 			who: &T::AccountId,
 			info: &TransactionInfo,
@@ -2007,24 +2125,20 @@ pub mod pallet {
 			(Option<ValidTransaction>, Option<AuthorizationScopeFor<T>>),
 			TransactionValidityError,
 		> {
-			let auth = Authorizations::<T>::get(AuthorizationScope::Account(who.clone()))
-				.ok_or(AUTHORIZATION_NOT_FOUND)?;
-			if auth.expired(Self::now()) || !auth.extent.has_permanent_capacity(info.size as u64) {
-				return Err(AUTHORIZATION_NOT_FOUND.into());
+			if AutoRenewals::<T>::contains_key(info.content_hash) {
+				return Err(AUTO_RENEWAL_ALREADY_ENABLED.into());
 			}
-			Self::check_authorization(
-				&AuthorizationScope::Account(who.clone()),
-				0,
-				context.consume_authorization(),
-				false,
-			)?;
+			Self::check_account_projection(who, info.size as u64)?;
+			let scope = AuthorizationScope::Account(who.clone());
 			Ok((
-				context.want_valid_transaction().then(|| ValidTransaction {
-					priority: T::StoreRenewPriority::get(),
-					longevity: T::StoreRenewLongevity::get(),
-					..Default::default()
+				context.want_valid_transaction().then(|| {
+					ValidTransaction::with_tag_prefix("TransactionStorageCheckedSigned")
+						.and_provides((who.clone(), info.content_hash))
+						.priority(T::StoreRenewPriority::get())
+						.longevity(T::StoreRenewLongevity::get())
+						.into()
 				}),
-				None,
+				Some(scope),
 			))
 		}
 
@@ -2154,10 +2268,13 @@ pub mod pallet {
 					));
 				},
 				Call::<T>::renew { block, index } => {
-					// Feeless one-shot registration. Validates the snapshot precondition
-					// (auth exists, unexpired, has room for one more renewal of
-					// `info.size`) and consumes one tx slot as the registration fee.
-					// The dispatch body writes `AutoRenewals[hash]` and emits the event.
+					// Feeless one-shot registration. Register-time projection:
+					// `extent + active + (1, size) ≤ allowance` on both axes. No extent
+					// mutation here — the eventual renewal cycle charges via
+					// `do_process_auto_renewals`. Returning `Some(Account(who))` causes
+					// the extension to rewrite the origin to `Origin::Authorized`, so
+					// dispatch gates on `ensure_authorized` like the other storage
+					// extrinsics (`store`, `force_renew`, `renew_content_hash`).
 					let info = Self::transaction_info(*block, *index).ok_or(RENEWED_NOT_FOUND)?;
 					return Self::validate_signed_one_shot_renew(who, &info, context);
 				},
@@ -2169,43 +2286,16 @@ pub mod pallet {
 					return Self::validate_signed_one_shot_renew(who, &info, context);
 				},
 				Call::<T>::enable_auto_renew { content_hash } => {
-					// Force-renew + schedule. `enable_auto_renew` charges as a real renewal
-					// (per-account `bytes_permanent`, chain-wide `PermanentStorageUsed`,
-					// and one tx slot) and dispatch performs the renewal here-and-now in
-					// addition to registering the auto-renewal. Bounding spam against the
-					// renew hard caps (rather than a free snapshot check) means a caller
-					// cannot register more auto-renewals than `bytes_allowance` would
-					// support — the cost is paid upfront and is consistent with how a
-					// regular `renew` is charged.
-					//
-					// Account scope only: `AutoRenewals[hash].account` is set to the
-					// signer, so the signer's own authorization must cover the cost.
-					// Preimage authorization is not accepted here because the
-					// registration is account-scoped — letting anyone with preimage
-					// rights tie up a slot under their own name doesn't match the
-					// registration semantics.
+					// Feeless recurring registration. Same projection + origin-rewrite
+					// pattern as `renew`; dispatch gates on `ensure_authorized` and
+					// writes `AutoRenewals[hash]` with `recurring: true`.
 					if AutoRenewals::<T>::contains_key(*content_hash) {
 						return Err(AUTO_RENEWAL_ALREADY_ENABLED.into());
 					}
-
 					let (block, index) = TransactionByContentHash::<T>::get(*content_hash)
 						.ok_or(RENEWED_NOT_FOUND)?;
 					let info = Self::transaction_info(block, index).ok_or(RENEWED_NOT_FOUND)?;
-
-					if !Self::data_size_ok(info.size as usize) {
-						return Err(BAD_DATA_SIZE.into());
-					}
-					if Self::block_transactions_full() {
-						return Err(InvalidTransaction::ExhaustsResources.into());
-					}
-
-					Self::check_authorization(
-						&AuthorizationScope::Account(who.clone()),
-						info.size,
-						context.consume_authorization(),
-						true,
-					)?;
-
+					Self::check_account_projection(who, info.size as u64)?;
 					let scope = AuthorizationScope::Account(who.clone());
 					return Ok((
 						context.want_valid_transaction().then(|| {
@@ -2263,6 +2353,16 @@ pub mod pallet {
 			.is_ok();
 
 			if !used_preimage_auth {
+				// For account-funded renewals, the projection must also account for
+				// the caller's pending registrations in `AccountActiveAutoRenewals` so
+				// a manual `force_renew` / `renew_content_hash` can't push
+				// `extent + active + this` past the allowance. Stores (`is_renew ==
+				// false`) and preimage-funded renewals skip the projection — stores use
+				// the soft-saturating model, and preimage funds are a chain-wide budget
+				// independent of any account's registrations.
+				if is_renew {
+					Self::check_account_projection(who, size as u64)?;
+				}
 				Self::check_authorization(
 					&AuthorizationScope::Account(who.clone()),
 					size as u32,

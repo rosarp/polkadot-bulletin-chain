@@ -369,4 +369,11 @@ impl<T: frame_system::Config> pallet_bulletin_transaction_storage::WeightInfo fo
 			.saturating_add(T::DbWeight::get().reads(2))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
+	/// Placeholder weight for the v4→v5 migration step (one `AutoRenewals` entry per
+	/// iteration). Re-benchmark once stable.
+	fn migrate_v4_to_v5_step() -> Weight {
+		Weight::from_parts(12_000_000, 1_000)
+			.saturating_add(T::DbWeight::get().reads(4))
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
 }
