@@ -88,9 +88,9 @@ use sp_transaction_storage_proof::num_chunks;
 #[cfg(feature = "try-runtime")]
 const LOG_TARGET: &str = "runtime::data-renewal";
 
-// `InvalidTransaction::Custom` codes owned by this pallet. The values predate the
-// pallet split (they lived in `pallet-bulletin-transaction-storage`) and must stay
-// wire-stable; the storage pallet reserves them.
+// `InvalidTransaction::Custom` codes owned by this pallet. They share one `u8`
+// namespace with `pallet-bulletin-transaction-storage`'s codes (which reserves these
+// values) and are matched on by clients — keep them wire-stable.
 /// Renewed extrinsic not found.
 pub const RENEWED_NOT_FOUND: InvalidTransaction = InvalidTransaction::Custom(2);
 /// Renew rejected: would push the signer's `bytes_permanent` past their `bytes_allowance`
@@ -157,7 +157,7 @@ pub mod pallet {
 		CannotDisablePrepaidAutoRenewal,
 	}
 
-	const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
+	const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
 	#[pallet::pallet]
 	#[pallet::storage_version(STORAGE_VERSION)]

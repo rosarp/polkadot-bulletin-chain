@@ -114,8 +114,8 @@ pub type AuthorizedCallerFor<T> = AuthorizedCaller<<T as frame_system::Config>::
 /// An authorization to store data.
 ///
 /// The value shape (the `extra` field era) is tracked by
-/// `pallet-bulletin-transaction-storage-renewal`'s storage version from its v2 on, not
-/// by this pallet's.
+/// `pallet-bulletin-transaction-storage-renewal`'s storage version, not by this
+/// pallet's.
 #[derive(Encode, Decode, scale_info::TypeInfo, MaxEncodedLen)]
 pub struct Authorization<BlockNumber, Extra> {
 	/// Extent of the authorization (number of transactions/bytes).

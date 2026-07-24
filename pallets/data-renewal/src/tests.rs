@@ -49,7 +49,7 @@ fn pallet_compiles_and_storage_is_separate_from_transaction_storage() {
 		use polkadot_sdk_frame::deps::frame_support::traits::GetStorageVersion;
 		assert_eq!(
 			crate::Pallet::<Test>::on_chain_storage_version(),
-			polkadot_sdk_frame::deps::frame_support::traits::StorageVersion::new(2),
+			polkadot_sdk_frame::deps::frame_support::traits::StorageVersion::new(1),
 		);
 	});
 }
@@ -2867,7 +2867,7 @@ fn can_renew_rejects_when_chain_wide_cap_reached() {
 	});
 }
 
-/// `MigrateAuthorizationsExtra` reshapes pre-split `Authorization` values, **moving**
+/// The relocation migration reshapes pre-split `Authorization` values, **moving**
 /// `bytes_permanent` into `extent.extra` — never zeroing it. The old and new encodings
 /// are the same byte length, so this also guards against a silent misdecode of stale
 /// values (the reason the migration must run single-block in the upgrade block).
@@ -2893,9 +2893,10 @@ fn authorizations_extra_migration_moves_bytes_permanent() {
 		let misdecoded = txs::Authorizations::<Test>::get(&scope).expect("same length decodes");
 		assert_ne!(misdecoded.extent.extra.bytes_permanent, 2000);
 
-		// Run the reshape (version-gated below 2).
-		StorageVersion::new(1).put::<crate::Pallet<Test>>();
-		crate::migrations::v2::MigrateAuthorizationsExtra::<Test>::on_runtime_upgrade();
+		// Run the split migration (version-gated below 1; fresh chains in tests are
+		// genesis-stamped at the current version, so reset to the pre-split state).
+		StorageVersion::new(0).put::<crate::Pallet<Test>>();
+		crate::migrations::RelocateFromTransactionStorage::<Test>::on_runtime_upgrade();
 
 		let migrated = txs::Authorizations::<Test>::get(&scope).expect("still present");
 		assert_eq!(migrated.extent.transactions, 3);
@@ -2908,10 +2909,10 @@ fn authorizations_extra_migration_moves_bytes_permanent() {
 			"bytes_permanent must be moved, not zeroed",
 		);
 		assert_eq!(migrated.expiration, 99);
-		assert_eq!(crate::Pallet::<Test>::on_chain_storage_version(), StorageVersion::new(2));
+		assert_eq!(crate::Pallet::<Test>::on_chain_storage_version(), StorageVersion::new(1));
 
 		// Idempotent: a second run is version-gated to a no-op.
-		crate::migrations::v2::MigrateAuthorizationsExtra::<Test>::on_runtime_upgrade();
+		crate::migrations::RelocateFromTransactionStorage::<Test>::on_runtime_upgrade();
 		assert_eq!(
 			txs::Authorizations::<Test>::get(&scope).expect("still present").extent.extra,
 			PermanentExtent { bytes_permanent: 2000 },
