@@ -19,35 +19,29 @@
 
 use codec::{Decode, Encode, MaxEncodedLen};
 
-/// Per-entry `EntryMeta` wired into the storage pallet: marks entries created by
-/// `renew`/auto-renewal as [`EntryKind::Renew`] so `handle_obsolete` can decrement
-/// the chain-wide renewed-byte counter when they age out.
+/// Per-entry `EntryMeta` wired into the storage pallet; `handle_obsolete` decrements
+/// the chain-wide counter for aged-out [`EntryKind::Renew`] entries.
 ///
-/// INVARIANT: must stay identical (variant names AND 1-byte encoding, `Store = 0`,
-/// `Renew = 1`) to the storage pallet's retired `TransactionKind` — live `Transactions`
-/// entries written before the split decode through this type without migration, and
-/// metadata consumers see an unchanged enum. Locked by the
+/// INVARIANT: identical (names and 1-byte encoding) to the retired `TransactionKind`,
+/// so pre-split `Transactions` entries decode without migration. Locked by the
 /// `entry_kind_encoding_is_frozen` test.
 #[derive(
 	Copy, Clone, Debug, PartialEq, Eq, Default, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen,
 )]
 pub enum EntryKind {
-	/// Created by `store` (temporary storage); ages out silently.
+	/// Created by `store`; ages out silently.
 	#[default]
 	#[codec(index = 0)]
 	Store,
-	/// Created by `renew`/auto-renewal (permanent storage); counted in the chain-wide
-	/// renewed-byte counter.
+	/// Created by `renew`/auto-renewal; counted in the chain-wide counter.
 	#[codec(index = 1)]
 	Renew,
 }
 
-/// Per-authorization `AuthorizationExtra` wired into the storage pallet: this pallet's
-/// per-window renew quota, gated against the shared `bytes_allowance`
-/// (`bytes_permanent + size <= bytes_allowance`). Reset to `0` with the other extent
-/// counters when an expired authorization is re-granted; never decremented — the
-/// chain-wide `PermanentStorageUsed` counter is the source of truth for renewed
-/// on-chain bytes.
+/// Per-authorization `AuthorizationExtra` wired into the storage pallet: the
+/// per-window renew quota, gated as `bytes_permanent + size <= bytes_allowance`.
+/// Never decremented — [`crate::PermanentStorageUsed`] is the source of truth for
+/// renewed on-chain bytes.
 #[derive(
 	Copy, Clone, Debug, PartialEq, Eq, Default, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen,
 )]

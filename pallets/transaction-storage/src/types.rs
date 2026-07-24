@@ -38,18 +38,13 @@ pub(crate) type BalanceOf<T> =
 
 pub type CreditOf<T> = Credit<<T as frame_system::Config>::AccountId, <T as Config>::Currency>;
 
-/// Usage state of an authorization. All counters (including the opaque `extra`) reset
-/// when the authorization is (re-)granted on the expired-but-present path, so they
-/// measure consumption **within the current authorization window** — not lifetime
-/// on-chain footprint:
+/// Usage state of an authorization. All counters (including `extra`) reset on the
+/// expired-re-grant path — they measure per-window consumption, not lifetime:
 ///
-/// - `bytes` / `transactions` — soft side (priority signal). Saturate upward on every `store`;
-///   never gate.
+/// - `bytes` / `transactions` — soft side (priority signal); saturate, never gate.
 /// - `bytes_allowance` / `transactions_allowance` — caps set at grant time. `bytes_allowance` is
-///   also the cap consumer pallets gate their `extra` accounting against (the renewal pallet's
-///   per-window renew quota draws on the same allowance).
-/// - `extra` — opaque per-window consumption state owned by a consumer pallet
-///   ([`crate::Config::AuthorizationExtra`]); this pallet only stores and resets it.
+///   shared with the consumer pallet's `extra` accounting.
+/// - `extra` — opaque consumer-pallet state; this pallet only stores and resets it.
 #[derive(
 	Copy, Clone, PartialEq, Eq, Debug, Default, Encode, Decode, scale_info::TypeInfo, MaxEncodedLen,
 )]
@@ -62,8 +57,7 @@ pub struct AuthorizationExtent<Extra> {
 	pub bytes: u64,
 	/// Total byte allowance granted.
 	pub bytes_allowance: u64,
-	/// Opaque consumer-pallet consumption state (e.g. the renewal pallet's
-	/// `PermanentExtent`). Mutated only through
+	/// Opaque consumer-pallet state, mutated only through
 	/// [`crate::Pallet::try_mutate_active_authorization`].
 	pub extra: Extra,
 }
@@ -111,11 +105,8 @@ pub enum AuthorizedCaller<AccountId> {
 /// Convenience alias for [`AuthorizedCaller`] bound to a runtime's `AccountId`.
 pub type AuthorizedCallerFor<T> = AuthorizedCaller<<T as frame_system::Config>::AccountId>;
 
-/// An authorization to store data.
-///
-/// The value shape (the `extra` field era) is tracked by
-/// `pallet-bulletin-transaction-storage-renewal`'s storage version, not by this
-/// pallet's.
+/// An authorization to store data. The value shape is tracked by the renewal
+/// pallet's storage version, not this pallet's.
 #[derive(Encode, Decode, scale_info::TypeInfo, MaxEncodedLen)]
 pub struct Authorization<BlockNumber, Extra> {
 	/// Extent of the authorization (number of transactions/bytes).
@@ -134,11 +125,9 @@ impl<BlockNumber: PartialOrd + Copy, Extra> Authorization<BlockNumber, Extra> {
 
 pub type AuthorizationFor<T> = Authorization<BlockNumberFor<T>, <T as Config>::AuthorizationExtra>;
 
-/// Invariant-preserving mutable view over one unexpired authorization, passed to the
-/// closure of [`crate::Pallet::try_mutate_active_authorization`]. Consumer pallets get
-/// full mutable access to their own opaque payload plus the one native counter a
-/// consuming operation legitimately spends (a transaction slot) — never to allowances
-/// or expiry.
+/// Mutable view over one unexpired authorization, passed to
+/// [`crate::Pallet::try_mutate_active_authorization`]'s closure: the opaque payload
+/// plus one native tx slot — never allowances or expiry.
 pub struct ActiveAuthorization<'a, T: Config> {
 	pub(crate) authorization: &'a mut AuthorizationFor<T>,
 }
@@ -210,11 +199,9 @@ pub struct TransactionInfo<Meta> {
 	/// total chunks.
 	pub block_chunks: ChunkIndex,
 
-	/// Opaque per-entry payload ([`crate::Config::EntryMeta`]). This pallet stores it
-	/// verbatim (entries it creates carry `Default::default()`) and hands it back through
-	/// [`OnObsoleteTransactions::handle_obsolete`] at expiry. Field is appended at the end
-	/// of the struct; the wired type must keep the retired `TransactionKind`'s 1-byte
-	/// encoding so pre-existing entries decode unchanged.
+	/// Opaque per-entry payload ([`crate::Config::EntryMeta`]), stored verbatim and
+	/// handed back through [`OnObsoleteTransactions::handle_obsolete`] at expiry.
+	/// Tail field; the wired type must keep `TransactionKind`'s 1-byte encoding.
 	pub meta: Meta,
 }
 

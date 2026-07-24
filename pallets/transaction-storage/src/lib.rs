@@ -89,9 +89,8 @@ pub const AUTHORIZATION_NOT_EXPIRED: InvalidTransaction = InvalidTransaction::Cu
 pub const AUTHORIZER_NOT_FOUND: InvalidTransaction = InvalidTransaction::Custom(7);
 /// Authorizer budget has not been exhausted.
 pub const AUTHORIZATION_NOT_EXHAUSTED: InvalidTransaction = InvalidTransaction::Custom(8);
-// NOTE: `InvalidTransaction::Custom` codes 2, 5, 6 and 9-12 are reserved by
-// `pallet-bulletin-transaction-storage-renewal` (they predate the pallet split and must
-// stay wire-stable). Do not reuse them here.
+// NOTE: `Custom` codes 2, 5, 6 and 9-12 belong to
+// `pallet-bulletin-transaction-storage-renewal` (shared `u8` namespace); do not reuse.
 
 pub use extension::{CallInspector, MAX_WRAPPER_DEPTH};
 
@@ -163,20 +162,15 @@ pub mod pallet {
 		/// Longevity of unsigned transactions to remove expired authorizations.
 		#[pallet::constant]
 		type RemoveExpiredAuthorizationLongevity: Get<TransactionLongevity>;
-		/// Opaque per-entry payload stored on every [`TransactionInfo`]. This pallet never
-		/// interprets it: entries created by `store` carry `Default::default()`, and the
-		/// value is handed back through [`Config::OnObsoleteTransactions`] at expiry. Wire
-		/// `()` for runtimes that omit the renewal pallet, or
-		/// `pallet-bulletin-transaction-storage-renewal`'s `EntryKind` — whose encoding
-		/// must stay byte-identical to the retired `TransactionKind` so pre-existing
-		/// `Transactions` entries decode unchanged.
+		/// Opaque per-entry payload on [`TransactionInfo`], never interpreted here:
+		/// `store` writes `Default::default()`, expiry hands it back through
+		/// [`Config::OnObsoleteTransactions`]. Wire `()` or the renewal pallet's
+		/// `EntryKind`.
 		type EntryMeta: Member + codec::FullCodec + MaxEncodedLen + scale_info::TypeInfo + Default;
-		/// Opaque per-authorization payload stored inside [`AuthorizationExtent`]. This
-		/// pallet never interprets it: it is initialized/reset to `Default::default()`
-		/// with the other extent counters and mutated only by consumer pallets through
-		/// [`Pallet::try_mutate_active_authorization`] (the frame-system `AccountData`
-		/// pattern). Wire `()` for runtimes that omit the renewal pallet, or
-		/// `pallet-bulletin-transaction-storage-renewal`'s `PermanentExtent`.
+		/// Opaque per-authorization payload inside [`AuthorizationExtent`], never
+		/// interpreted here: reset with the other counters, mutated only through
+		/// [`Pallet::try_mutate_active_authorization`]. Wire `()` or the renewal
+		/// pallet's `PermanentExtent`.
 		type AuthorizationExtra: Member
 			+ codec::FullCodec
 			+ MaxEncodedLen
@@ -1534,14 +1528,10 @@ pub mod pallet {
 			}
 		}
 
-		/// Run `f` against the unexpired authorization at `scope`, giving a consumer
-		/// pallet atomic access to its opaque [`Config::AuthorizationExtra`] payload —
-		/// the frame-system `AccountData`/`StoredMap` pattern.
-		///
-		/// Missing or expired entry => `InvalidTransaction::Payment` without calling
-		/// `f`. The mutation is persisted iff `persist` is `true` AND `f` returned
-		/// `Ok`; with `persist == false`, `f` runs against a discarded copy (pool
-		/// validation vs. pre-dispatch consumption).
+		/// Run `f` against the unexpired authorization at `scope` — atomic access to
+		/// the opaque [`Config::AuthorizationExtra`] payload. Missing/expired =>
+		/// `InvalidTransaction::Payment` without calling `f`. Persisted iff `persist`
+		/// && `f` returned `Ok`; otherwise `f` runs against a discarded copy.
 		pub fn try_mutate_active_authorization<R>(
 			scope: &AuthorizationScopeFor<T>,
 			persist: bool,

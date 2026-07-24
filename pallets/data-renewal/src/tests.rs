@@ -1870,8 +1870,7 @@ fn renews_across_multiple_blocks_decrement_independently() {
 }
 
 /// The obsolete-block sweep decrements `PermanentStorageUsed` by exactly the sum of
-/// `Renew`-meta entries; `Store` entries do not contribute. Moved from the
-/// storage pallet when the decrement relocated into `handle_obsolete`.
+/// `Renew`-meta entries; `Store` entries do not contribute.
 #[test]
 fn obsolete_sweep_decrements_only_permanent_entries() {
 	new_test_ext().execute_with(|| {
@@ -1916,8 +1915,7 @@ fn obsolete_sweep_decrements_only_permanent_entries() {
 }
 
 /// The sweep emits a single `PermanentStorageUsedUpdated` event per obsolete block
-/// (not per renewed entry within the block) — keeps event volume bounded. Moved from
-/// the storage pallet when the decrement relocated into `handle_obsolete`.
+/// (not per renewed entry within the block) — keeps event volume bounded.
 #[test]
 fn obsolete_sweep_emits_single_used_updated_event_per_block() {
 	new_test_ext().execute_with(|| {

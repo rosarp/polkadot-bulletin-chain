@@ -92,38 +92,30 @@ where
 	}
 }
 
-/// Result payload of [`LeafValidator::validate_leaf`]: `None` when the call is not
-/// this validator's leaf; otherwise the leaf's [`ValidTransaction`] plus the
-/// [`AuthorizationScope`] charged (if any).
+/// [`LeafValidator::validate_leaf`] payload: `None` = not this validator's leaf;
+/// otherwise the leaf's validity plus the [`AuthorizationScope`] charged (if any).
 pub type LeafValidation<T> = Option<(ValidTransaction, Option<AuthorizationScopeFor<T>>)>;
 
-/// One pallet's contribution to [`ValidateAuthorizedCalls`]'s shared call-tree walk.
-///
-/// Implemented by pallets whose calls need authorization-backed pool validation —
-/// this pallet's [`StorageLeaves`] and the renewal pallet's `RenewalLeaves`. The
-/// runtime wires a tuple of validators; every leaf found in the walk is offered to
-/// each element in order until one claims it.
+/// One pallet's contribution to [`ValidateAuthorizedCalls`]'s call-tree walk. The
+/// runtime wires a tuple; each leaf is offered to the elements in order until one
+/// claims it.
 pub trait LeafValidator<T: Config> {
-	/// Pool-time validation of one call-tree node. Returns `Ok(None)` when `call`
-	/// is not this validator's leaf, `Ok(Some((valid, maybe_scope)))` when claimed
-	/// and valid. `depth` is the wrapper depth (`0` = direct extrinsic), for
-	/// direct-only rules. Must not mutate state.
+	/// Pool-time validation of one node. `depth` is the wrapper depth (`0` =
+	/// direct extrinsic), for direct-only rules. Must not mutate state.
 	fn validate_leaf(
 		who: &T::AccountId,
 		call: &RuntimeCallOf<T>,
 		depth: u32,
 	) -> Result<LeafValidation<T>, TransactionValidityError>;
 
-	/// Inclusion-time counterpart: consume the authorization. Returns `Ok(true)`
-	/// when `call` was this validator's leaf.
+	/// Inclusion-time counterpart: consume the authorization. `Ok(true)` = claimed.
 	fn prepare_leaf(
 		who: &T::AccountId,
 		call: &RuntimeCallOf<T>,
 		depth: u32,
 	) -> Result<bool, TransactionValidityError>;
 
-	/// This validator's contribution to the extension's declared weight for the
-	/// top-level `call`.
+	/// Contribution to the extension's declared weight for the top-level `call`.
 	fn leaf_weight(call: &RuntimeCallOf<T>) -> Weight;
 }
 
@@ -162,9 +154,8 @@ impl<T: Config> LeafValidator<T> for Tuple {
 	}
 }
 
-/// [`LeafValidator`] for this pallet's calls: `store` / `store_with_cid_config`
-/// (direct-only, authorization-consuming) and the management calls (`authorize_*`,
-/// `refresh_*`, `remove_expired_*`), which may appear inside wrappers.
+/// [`LeafValidator`] for this pallet's calls: store calls are direct-only;
+/// management calls (`authorize_*`, `refresh_*`, `remove_expired_*`) may be wrapped.
 pub struct StorageLeaves<T>(PhantomData<T>);
 
 impl<T: Config> LeafValidator<T> for StorageLeaves<T>
@@ -210,19 +201,13 @@ where
 	}
 }
 
-/// Transaction extension that validates authorization-gated Bulletin calls in a
-/// single walk over the call tree.
+/// Validates authorization-gated Bulletin calls in a single walk over the call tree.
 ///
-/// `I` supplies the wrapper inspector ([`CallInspector`], e.g. `Utility::batch`
-/// unwrap); `L` is a [`LeafValidator`] tuple — one element per participating pallet.
-/// Each leaf is offered to the validators in order; the first claimant handles it.
-/// `validate()` checks without consuming and combines the leaves'
-/// [`ValidTransaction`]s; `prepare()` repeats the walk consuming the authorization.
-/// The origin is rewritten once, after the walk, to [`Origin::Authorized`] with the
-/// last claimed scope.
-///
-/// A renewal-free runtime wires `L = (StorageLeaves<Runtime>,)`; runtimes with
-/// `pallet-bulletin-transaction-storage-renewal` add its `RenewalLeaves`.
+/// `I` unwraps wrappers ([`CallInspector`]); `L` is a [`LeafValidator`] tuple, one
+/// element per participating pallet. `validate()` checks without consuming and
+/// combines the leaves' validity; `prepare()` repeats the walk consuming. The origin
+/// is rewritten once, after the walk, to [`Origin::Authorized`] with the last
+/// claimed scope. A store-only runtime wires `L = (StorageLeaves<Runtime>,)`.
 #[derive(Encode, Decode, DecodeWithMemTracking, scale_info::TypeInfo)]
 #[codec(encode_bound())]
 #[codec(decode_bound())]
@@ -236,8 +221,7 @@ impl<T, I, L> Default for ValidateAuthorizedCalls<T, I, L> {
 	}
 }
 
-// Manual impls: derives would demand `I: Clone + Eq` / `L: Clone + Eq`, which the
-// marker parameters don't need — the struct is a unit.
+// Manual impls: derives would demand `I: Clone + Eq` / `L: Clone + Eq` on markers.
 impl<T, I, L> Clone for ValidateAuthorizedCalls<T, I, L> {
 	fn clone(&self) -> Self {
 		Self(PhantomData)
@@ -270,11 +254,9 @@ where
 	I: CallInspector<T>,
 	RuntimeCallOf<T>: IsSubType<Call<T>>,
 {
-	/// Offer each node to `visitor` (returning whether it was claimed); descend
-	/// into unclaimed wrappers via [`CallInspector::inspect_wrapper`]. Unclaimed
-	/// non-wrapper nodes are ignored. Fail-safe: an unclaimed node at
-	/// [`MAX_WRAPPER_DEPTH`] is rejected rather than risking a hidden direct-only
-	/// call slipping through.
+	/// Offer each node to `visitor`; descend into unclaimed wrappers, ignore other
+	/// unclaimed nodes. Unclaimed at [`MAX_WRAPPER_DEPTH`] is rejected rather than
+	/// risking a hidden direct-only call slipping through.
 	fn walk<F>(
 		call: &RuntimeCallOf<T>,
 		depth: u32,

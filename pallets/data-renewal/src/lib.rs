@@ -31,21 +31,16 @@
 //!
 //! ## Cross-pallet contract
 //!
-//! The storage pallet has no renewal vocabulary; this pallet owns all of it through two
-//! opaque payloads it defines and the runtime wires ([`EntryKind`] as `EntryMeta`,
+//! The storage pallet has no renewal vocabulary; this pallet owns all of it through
+//! two opaque payloads the runtime wires ([`EntryKind`] as `EntryMeta`,
 //! [`PermanentExtent`] as `AuthorizationExtra`):
 //!
-//! - **Down → storage:** dispatchables and the trait callback read/mutate `Transactions`,
-//!   `TransactionByContentHash`, and `BlockTransactions` directly through
-//!   `pallet_bulletin_transaction_storage`'s public API. Per-account renew accounting
-//!   ([`PermanentExtent::bytes_permanent`], gated against the shared `bytes_allowance`) is mutated
-//!   atomically through `try_mutate_active_authorization` — the frame-system `AccountData` pattern.
-//! - **Up ← storage:** [`OnObsoleteTransactions::handle_obsolete`] is called by the storage
-//!   pallet's `on_initialize` when entries age out at the `RetentionPeriod` boundary; it decrements
-//!   [`PermanentStorageUsed`] for aged-out `Renew` entries, and entries with a `Renewals`
-//!   registration are pushed to [`PendingAutoRenewals`] for the same block's inherent to drain.
-//! - **Per-cycle accounting** (per-account `bytes_permanent` and the chain-wide
-//!   [`PermanentStorageUsed`]) is charged by [`Pallet::check_renew_authorization`].
+//! - **Down → storage:** dispatchables use the storage pallet's public API; the per-account renew
+//!   quota is mutated atomically through `try_mutate_active_authorization`.
+//! - **Up ← storage:** [`OnObsoleteTransactions::handle_obsolete`] fires at the `RetentionPeriod`
+//!   boundary — it decrements [`PermanentStorageUsed`] for aged-out `Renew` entries and queues
+//!   registered entries into [`PendingAutoRenewals`] for the same block's inherent.
+//! - **Per-cycle accounting** is charged by [`Pallet::check_renew_authorization`].
 //!
 //! ## Prepayment model
 //!
@@ -598,17 +593,11 @@ impl<T: Config> Pallet<T> {
 }
 
 impl<T: Config> Pallet<T> {
-	/// Renew-authorization check — the hard-cap counterpart of the storage pallet's
-	/// soft `check_authorization`. One atomic `Authorizations` mutate via
-	/// [`txs::Pallet::try_mutate_active_authorization`]: existence + expiry, the
-	/// per-account hard cap (`bytes_permanent + size <= bytes_allowance`, rejecting
-	/// with [`PERMANENT_ALLOWANCE_EXCEEDED`]), and the chain-wide hard cap
-	/// ([`CHAIN_PERMANENT_CAP_REACHED`]).
-	///
-	/// With `consume`, bumps the scope's `bytes_permanent`, one native transaction
-	/// slot, and the chain-wide `PermanentStorageUsed` counter; the matching decrement
-	/// happens in [`OnObsoleteTransactions::handle_obsolete`] when the renewed entry's
-	/// block ages out.
+	/// Hard-cap renew check in one atomic `Authorizations` mutate: existence +
+	/// expiry, per-account cap ([`PERMANENT_ALLOWANCE_EXCEEDED`]), chain-wide cap
+	/// ([`CHAIN_PERMANENT_CAP_REACHED`]). With `consume`, bumps `bytes_permanent`,
+	/// one tx slot, and [`PermanentStorageUsed`]; the matching decrement happens in
+	/// `handle_obsolete` when the renewed entry ages out.
 	pub(crate) fn check_renew_authorization(
 		scope: &AuthorizationScopeFor<T>,
 		size: u32,
@@ -643,14 +632,10 @@ impl<T: Config> Pallet<T> {
 		Ok(())
 	}
 
-	/// Read [`PermanentStorageUsed`], apply `f` to compute the new value, write it back,
-	/// and emit [`Event::PermanentStorageUsedUpdated`]. If the value was below the
-	/// [`PERMANENT_STORAGE_NEAR_CAP_PERCENT`] threshold and crossed it (rising edge),
-	/// also emit [`Event::PermanentStorageNearCap`].
-	///
-	/// Centralising read + write + events in one helper guarantees every change to the
-	/// chain-wide counter is observable off-chain, and that the near-cap signal fires
-	/// exactly once per crossing.
+	/// Update [`PermanentStorageUsed`] via `f`, emitting
+	/// [`Event::PermanentStorageUsedUpdated`] and — on the rising edge across the
+	/// [`PERMANENT_STORAGE_NEAR_CAP_PERCENT`] threshold —
+	/// [`Event::PermanentStorageNearCap`], exactly once per crossing.
 	pub(crate) fn update_permanent_storage_used(f: impl FnOnce(u64) -> u64) {
 		let old = PermanentStorageUsed::<T>::get();
 		let new = f(old);
@@ -726,11 +711,9 @@ impl<T: Config> Pallet<T> {
 		}))
 	}
 
-	/// Active-authorization summary for `who`, shaped for the
-	/// `BulletinTransactionStorageApi` runtime API. Composed here because the
-	/// `bytes_permanent_used` field reads this pallet's [`PermanentExtent`]; the wire
-	/// format is unchanged. Returns `None` if the account has no authorization or its
-	/// authorization has expired.
+	/// Active-authorization summary for the `BulletinTransactionStorageApi` runtime
+	/// API; composed here because `bytes_permanent_used` reads [`PermanentExtent`].
+	/// `None` when missing or expired.
 	pub fn account_authorization(
 		who: T::AccountId,
 	) -> Option<AccountAuthorization<BlockNumberFor<T>>> {
@@ -747,15 +730,8 @@ impl<T: Config> Pallet<T> {
 		})
 	}
 
-	/// Returns `true` iff a `renew(entry)` call would currently pass transaction
-	/// validation for `who`. Mirrors the preconditions enforced by
-	/// [`Self::check_renew_authorization`]:
-	///
-	/// - `entry` resolves to currently-stored data
-	/// - the stored data's size is within `[1, MaxTransactionSize]`
-	/// - `who` has an unexpired authorization entry
-	/// - per-account hard cap: `bytes_permanent + size <= bytes_allowance`
-	/// - chain-wide hard cap: `PermanentStorageUsed + size <= MaxPermanentStorageSize`
+	/// `true` iff `renew(entry)` would currently pass validation for `who`: `entry`
+	/// resolves, size in range, unexpired authorization, and both hard caps clear.
 	pub fn can_renew(who: &T::AccountId, entry: &TransactionRef<BlockNumberFor<T>>) -> bool {
 		let Ok(info) =
 			pallet_bulletin_transaction_storage::Pallet::<T>::resolve_transaction_ref(entry)
@@ -771,13 +747,9 @@ impl<T: Config> Pallet<T> {
 }
 
 impl<T: Config> Pallet<T> {
-	/// Chain-wide permanent-storage accounting invariants. With both sides of the
-	/// accounting visible from this pallet, the counter is provably exact:
-	///
-	/// - `PermanentStorageUsed == Σ size of `meta == Renew` entries in the storage pallet's
-	///   `Transactions` + Σ size(target) of `paid == true` [`Renewals`] registrations` — prepaid
-	///   registrations were charged before their `Renew` entry is written; when the cycle fires the
-	///   entry appears and `paid` flips.
+	/// try-state invariants:
+	/// - `PermanentStorageUsed == Σ Renew entry sizes + Σ paid registration sizes` (prepaid
+	///   registrations are charged before their `Renew` entry exists).
 	/// - `PermanentStorageUsed <= MaxPermanentStorageSize`.
 	#[cfg(any(feature = "try-runtime", test))]
 	pub(crate) fn do_try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
@@ -824,12 +796,9 @@ impl<T: Config> Pallet<T> {
 	}
 }
 
-/// Upward callback fired by `pallet_bulletin_transaction_storage::on_initialize`
-/// with the obsolete-block sweep result. Decrements the chain-wide renewed-byte
-/// counter by the sum of aged-out `Renew` entries, and for each `is_latest`
-/// entry with a matching [`Renewals`] registration, queues it into
-/// [`PendingAutoRenewals`] for the same block's `process_pending_renewals`
-/// inherent to drain.
+/// Obsolete-block sweep callback: decrements the chain-wide counter for aged-out
+/// `Renew` entries and queues `is_latest` entries with a [`Renewals`] registration
+/// into [`PendingAutoRenewals`] for the same block's inherent.
 impl<T: Config> OnObsoleteTransactions<BlockNumberFor<T>, EntryKind> for Pallet<T> {
 	fn handle_obsolete(_obsolete: BlockNumberFor<T>, items: &[(TransactionInfoFor<T>, bool)]) {
 		// Renewed bytes leaving the retention window free up permanent capacity.

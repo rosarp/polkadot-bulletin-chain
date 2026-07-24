@@ -45,16 +45,12 @@ const NEW_PALLET: &[u8] = b"DataRenewal";
 /// One-shot migration relocating `AutoRenewals`, `PendingAutoRenewals`, and the
 /// `PermanentStorageUsed` counter from the `TransactionStorage` pallet prefix to the
 /// `DataRenewal` pallet prefix, and reshaping every `TransactionStorage::Authorizations`
-/// value from the pre-split layout (`bytes_permanent` inline in the extent) to the
-/// `AuthorizationExtra` layout — **moving** `bytes_permanent` into this pallet's
+/// value to the `AuthorizationExtra` layout — **moving** `bytes_permanent` into
 /// [`PermanentExtent`]. Bumps the renewal pallet's storage version from 0 to 1.
 ///
-/// The reshape must run single-block in the upgrade block: the old and new
-/// `Authorization` encodings are the same byte length with all fixed-width fields, so a
-/// stale value read through the new type decodes *successfully* with shifted fields.
-/// The `Authorizations` map is admin-scale (authorizer-granted accounts + preimages).
-///
-/// Idempotent: re-running after success is a no-op (storage version gate).
+/// Must run single-block: the old and new `Authorization` encodings are the same byte
+/// length (all fixed-width fields), so a stale value read through the new type decodes
+/// *successfully* with shifted fields. Idempotent via the storage-version gate.
 pub struct RelocateFromTransactionStorage<T: Config>(PhantomData<T>);
 
 impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
@@ -65,13 +61,9 @@ impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
 			return Weight::zero();
 		}
 
-		// `AutoRenewals` (StorageMap): re-key every entry from the old
-		// `TransactionStorage` prefix to the new `DataRenewal` prefix, reshaping any
-		// pre-v4 `{ account }` value into the current `RenewalData { account,
-		// recurring, paid }` layout. A plain `move_prefix` would carry pre-v4 bytes
-		// over verbatim and leave them undecodable under this pallet's type — see the
-		// retired `transaction_storage::migrations::v4::MigrateV3ToV4` for the original
-		// reshape. The Blake2_128Concat key suffix (the content hash) is identical
+		// `AutoRenewals`: re-key from the old prefix, reshaping pre-v4 `{ account }`
+		// values into the current `RenewalData` layout (a plain `move_prefix` would
+		// leave them undecodable). The Blake2_128Concat key suffix is identical
 		// across prefixes, so only the prefix is rewritten.
 		let old_pallet = <txs::Pallet<T> as PalletInfoAccess>::name().as_bytes();
 		let old_auto_prefix = storage_prefix(old_pallet, b"AutoRenewals");
@@ -118,8 +110,7 @@ impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
 			sp_io::storage::clear(&old_pending_key);
 		}
 
-		// `PermanentStorageUsed` (StorageValue<u64>): the chain-wide renewed-byte
-		// counter moved into this pallet with the split. Move verbatim if present.
+		// `PermanentStorageUsed` (StorageValue<u64>): move verbatim if present.
 		let old_used_key = storage_prefix(OLD_PALLET, b"PermanentStorageUsed");
 		let new_used_key = storage_prefix(NEW_PALLET, b"PermanentStorageUsed");
 		if let Some(raw) = sp_io::storage::get(&old_used_key) {
@@ -127,8 +118,7 @@ impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
 			sp_io::storage::clear(&old_used_key);
 		}
 
-		// `Authorizations` reshape: move `bytes_permanent` out of the extent into the
-		// opaque `extra` ([`PermanentExtent`]).
+		// `Authorizations` reshape: `bytes_permanent` moves into the opaque `extra`.
 		let mut reshaped: u64 = 0;
 		txs::Authorizations::<T>::translate::<OldAuthorization<BlockNumberFor<T>>, _>(
 			|_scope, old| {
@@ -162,8 +152,7 @@ impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
 	#[cfg(feature = "try-runtime")]
 	fn pre_upgrade(
 	) -> Result<alloc::vec::Vec<u8>, polkadot_sdk_frame::deps::sp_runtime::TryRuntimeError> {
-		// Mirror the runtime gate: on an already-migrated chain the migration is a
-		// no-op, so record nothing and let post_upgrade skip its equality checks.
+		// Mirror the runtime gate: already migrated → no-op, post checks skipped.
 		let current = <crate::pallet::Pallet<T> as GetStorageVersion>::on_chain_storage_version();
 		if current >= StorageVersion::new(1) {
 			return Ok(None::<(u64, Option<u64>, u64, u64)>.encode());
@@ -181,8 +170,7 @@ impl<T: Config> OnRuntimeUpgrade for RelocateFromTransactionStorage<T> {
 		let old_used = sp_io::storage::get(&storage_prefix(OLD_PALLET, b"PermanentStorageUsed"))
 			.and_then(|raw| u64::decode(&mut &raw[..]).ok());
 
-		// `Authorizations` under the old layout: count + Σ bytes_permanent, to prove
-		// the reshape moves (never zeroes) the per-window quota.
+		// Old-layout count + Σ bytes_permanent: the reshape must move, never zero.
 		let mut auth_count: u64 = 0;
 		let mut auth_perm_sum: u64 = 0;
 		for key in txs::Authorizations::<T>::iter_keys() {
