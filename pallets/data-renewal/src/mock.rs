@@ -111,6 +111,8 @@ impl pallet_bulletin_transaction_storage::Config for Test {
 		EnsureAllowedAuthorizers<Self>,
 	>;
 	type StoreTxParams = StoreTxParams;
+	// Untagged family: the prefix is unused, so the store item's pricing serves.
+	type AuthorizeTxParams = StoreTxParams;
 	type RemoveExpiredAccountAuthorizationTxParams = RemoveExpiredAccountAuthorizationTxParams;
 	type RemoveExpiredPreimageAuthorizationTxParams = RemoveExpiredPreimageAuthorizationTxParams;
 	type RemoveExhaustedAuthorizerTxParams = RemoveExhaustedAuthorizerTxParams;

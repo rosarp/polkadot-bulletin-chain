@@ -195,7 +195,7 @@ impl<T: Config> Pallet<T> {
 				}
 				let scope = AuthorizationScope::Account(who.clone());
 				let valid = if want_valid {
-					<T as Config>::RenewTxParams::get().untagged()
+					<T as Config>::RenewTxParams::get().no_dedup()
 				} else {
 					ValidTransaction::default()
 				};

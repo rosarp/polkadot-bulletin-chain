@@ -39,6 +39,13 @@ parameter_types! {
 		TransactionPriority::MAX / 4,
 		crate::DAYS as TransactionLongevity,
 	);
+	// `authorize_*` / `refresh_*` carry no dedup tag, so only the pricing is read; kept
+	// equal to store, as before the split.
+	pub const AuthorizeTxParams: ValidTransactionParams = ValidTransactionParams::new(
+		"TransactionStorageAuthorize",
+		TransactionPriority::MAX / 4,
+		crate::DAYS as TransactionLongevity,
+	);
 	pub const RemoveExpiredAccountAuthorizationTxParams: ValidTransactionParams =
 		ValidTransactionParams::new(
 			"TransactionStorageRemoveExpiredAccountAuthorization",
@@ -121,6 +128,7 @@ impl pallet_bulletin_transaction_storage::Config for Runtime {
 		EnsureAllowedAuthorizers<Runtime>,
 	>;
 	type StoreTxParams = StoreTxParams;
+	type AuthorizeTxParams = AuthorizeTxParams;
 	type RemoveExpiredAccountAuthorizationTxParams = RemoveExpiredAccountAuthorizationTxParams;
 	type RemoveExpiredPreimageAuthorizationTxParams = RemoveExpiredPreimageAuthorizationTxParams;
 	type RemoveExhaustedAuthorizerTxParams = RemoveExhaustedAuthorizerTxParams;
